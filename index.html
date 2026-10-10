@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Treadmill Live</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #1a1d24; --text: #f2f4f8; --muted: #8b93a3;
+    --accent: #4fc3f7; --ok: #66bb6a; --bad: #ef5350; --hr: #ff7070;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .status { font-size: 14px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); }
+  .dot.on { background: var(--ok); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card { background: var(--card); border-radius: 14px; padding: 14px 16px; }
+  .card.big { grid-column: 1 / -1; }
+  .label { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .value { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .big .value { font-size: 72px; color: var(--accent); }
+  .unit { font-size: 16px; color: var(--muted); font-weight: 500; margin-left: 4px; }
+  .hr .value { color: var(--hr); }
+  canvas { width: 100%; height: 140px; display: block; margin-top: 8px; }
+  footer { margin-top: 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
+  button { background: var(--card); color: var(--text); border: 1px solid #333a46; border-radius: 8px; padding: 8px 14px; font-size: 14px; }
+  code { word-break: break-all; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Treadmill Live</h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="status">Connecting…</span></div>
+</header>
+
+<div class="grid">
+  <div class="card big">
+    <div class="label">Speed</div>
+    <div class="value"><span id="speed">0.0</span><span class="unit" id="speedUnit">mph</span></div>
+    <canvas id="chart"></canvas>
+  </div>
+  <div class="card"><div class="label">Time</div><div class="value" id="time">0:00</div></div>
+  <div class="card"><div class="label">Distance</div><div class="value"><span id="distance">0.00</span><span class="unit" id="distUnit">mi</span></div></div>
+  <div class="card"><div class="label">Pace</div><div class="value"><span id="pace">--</span><span class="unit" id="paceUnit">/mi</span></div></div>
+  <div class="card"><div class="label">Incline</div><div class="value"><span id="incline">0</span><span class="unit">%</span></div></div>
+  <div class="card hr"><div class="label">Heart rate</div><div class="value"><span id="hr">--</span><span class="unit">bpm</span></div></div>
+  <div class="card"><div class="label">Climb</div><div class="value"><span id="elev">0</span><span class="unit">ft</span></div></div>
+</div>
+
+<footer>
+  <span>Last packet: <code id="raw">–</code></span>
+  <button id="reset">Reset workout</button>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const history = [];
+const MAX_POINTS = 600; // 10 minutes at 1 Hz
+
+function fmtTime(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const mm = h ? String(m).padStart(2, "0") : m;
+  return (h ? h + ":" : "") + mm + ":" + String(sec).padStart(2, "0");
+}
+function fmtPace(min) {
+  if (!min || min > 99) return "--";
+  const m = Math.floor(min), s = Math.round((min - m) * 60);
+  return s === 60 ? (m + 1) + ":00" : m + ":" + String(s).padStart(2, "0");
+}
+
+function draw() {
+  const c = $("chart"), dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const ctx = c.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  if (history.length < 2) return;
+  const max = Math.max(4, ...history) * 1.1;
+  ctx.strokeStyle = "#2a2f3a"; ctx.lineWidth = 1;
+  ctx.fillStyle = "#8b93a3"; ctx.font = "11px system-ui";
+  for (let v = 0; v <= max; v += max > 8 ? 2 : 1) {
+    const y = h - (v / max) * h;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.fillText(v, 2, y - 2);
+  }
+  ctx.beginPath();
+  history.forEach((v, i) => {
+    const x = (i / (MAX_POINTS - 1)) * w, y = h - (v / max) * h;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.strokeStyle = "#4fc3f7"; ctx.lineWidth = 2; ctx.stroke();
+}
+
+function render(d) {
+  $("dot").classList.toggle("on", d.connected);
+  $("status").textContent = d.connected ? (d.device || "Connected") : "Treadmill not connected";
+  $("speed").textContent = d.speed.toFixed(1);
+  $("speedUnit").textContent = d.speed_unit;
+  $("distance").textContent = d.distance.toFixed(2);
+  $("distUnit").textContent = d.distance_unit;
+  $("pace").textContent = fmtPace(d.pace_min);
+  $("paceUnit").textContent = d.pace_unit;
+  $("incline").textContent = d.incline;
+  $("hr").textContent = d.heart_rate || "--";
+  $("elev").textContent = Math.round(d.elevation_ft);
+  $("time").textContent = fmtTime(d.moving_seconds);
+  $("raw").textContent = d.raw || "–";
+  history.push(d.speed);
+  if (history.length > MAX_POINTS) history.shift();
+  draw();
+}
+
+function connect() {
+  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onmessage = (e) => render(JSON.parse(e.data));
+  ws.onclose = () => {
+    $("dot").classList.remove("on");
+    $("status").textContent = "Server offline – retrying…";
+    setTimeout(connect, 2000);
+  };
+}
+
+$("reset").onclick = async () => {
+  if (!confirm("Reset time, distance and climb?")) return;
+  await fetch("/api/reset", { method: "POST" });
+  history.length = 0;
+};
+window.addEventListener("resize", draw);
+connect();
+</script>
+</body>
+</html>
