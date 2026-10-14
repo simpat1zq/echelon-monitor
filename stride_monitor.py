@@ -291,14 +291,33 @@ class StrideBLE:
         from bleak import BleakScanner
 
         if self.address:
-            log.info("Looking for %s ...", self.address)
-            return await BleakScanner.find_device_by_address(self.address, timeout=20)
-        log.info("Scanning for a treadmill whose name contains %r ...", self.name_prefix)
-        return await BleakScanner.find_device_by_filter(
-            lambda d, adv: self.name_prefix in (d.name or adv.local_name or "").upper()
-            or SERVICE_UUID in [u.lower() for u in adv.service_uuids],
-            timeout=20,
-        )
+            log.info("Scanning for %s ...", self.address)
+            device = await BleakScanner.find_device_by_address(self.address, timeout=15)
+        else:
+            log.info("Scanning for a treadmill whose name contains %r ...", self.name_prefix)
+            device = await BleakScanner.find_device_by_filter(
+                lambda d, adv: self.name_prefix in (d.name or adv.local_name or "").upper()
+                or SERVICE_UUID in [u.lower() for u in adv.service_uuids],
+                timeout=15,
+            )
+        if device is not None:
+            return device
+        # The scan can miss a treadmill BlueZ already knows (or is still connected
+        # to). Connecting through BlueZ's device path doesn't need a fresh scan
+        # result, and bleak reuses an existing connection if there is one.
+        try:
+            known = await self.known_treadmills()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("BlueZ lookup failed: %s", exc)
+            return None
+        if known:
+            from bleak.backends.device import BLEDevice
+
+            path, address, name, connected = known[0]
+            log.info("Not seen in the scan; trying a direct connection to %s (BlueZ connected=%s).",
+                     address, connected)
+            return BLEDevice(address, name, {"path": path, "props": {}})
+        return None
 
     async def write(self, hexstr_or_bytes):
         data = bytes.fromhex(hexstr_or_bytes) if isinstance(hexstr_or_bytes, str) else bytes(hexstr_or_bytes)
@@ -422,6 +441,9 @@ class StrideBLE:
                         except asyncio.TimeoutError:
                             pass
                 log.warning("Treadmill disconnected.")
+            except asyncio.CancelledError:
+                log.info("Disconnected from the treadmill.")
+                raise
             except FileNotFoundError:
                 log.error("Can't reach the Bluetooth service (BlueZ) over D-Bus. On the host, run "
                           "check_host.sh; in Docker, mount /run/dbus/system_bus_socket.")
@@ -437,43 +459,55 @@ class StrideBLE:
             return address.upper() == self.address.upper()
         return self.name_prefix in (name or "").upper()
 
+    async def _bluez_call(self, path, interface, member):
+        from dbus_fast import BusType, Message, MessageType
+        from dbus_fast.aio import MessageBus
+
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        try:
+            reply = await bus.call(Message(destination="org.bluez", path=path,
+                                           interface=interface, member=member))
+            if reply.message_type == MessageType.ERROR:
+                raise RuntimeError(f"{member} failed: {reply.error_name} {reply.body}")
+            return reply.body
+        finally:
+            bus.disconnect()
+
+    async def known_treadmills(self):
+        """Treadmills BlueZ already knows about: [(path, address, name, connected)]."""
+        body = await self._bluez_call("/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects")
+        found = []
+        for path, ifaces in body[0].items():
+            dev = ifaces.get("org.bluez.Device1")
+            if not dev:
+                continue
+            address = dev["Address"].value
+            name = dev["Name"].value if "Name" in dev else ""
+            if self._matches(address, name):
+                connected = bool(dev["Connected"].value) if "Connected" in dev else False
+                found.append((path, address, name, connected))
+        return found
+
     async def release_stale_connection(self):
         """Disconnect the treadmill if BlueZ still holds a connection to it."""
         try:
-            from dbus_fast import BusType, Message, MessageType
-            from dbus_fast.aio import MessageBus
-        except ImportError:
-            return
-        bus = None
-        try:
-            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-            reply = await bus.call(Message(destination="org.bluez", path="/",
-                                           interface="org.freedesktop.DBus.ObjectManager",
-                                           member="GetManagedObjects"))
-            if reply.message_type == MessageType.ERROR:
-                log.debug("GetManagedObjects failed: %s", reply.body)
-                return
-            for path, ifaces in reply.body[0].items():
-                dev = ifaces.get("org.bluez.Device1")
-                if not dev or not dev.get("Connected") or not dev["Connected"].value:
-                    continue
-                address = dev["Address"].value
-                name = dev["Name"].value if "Name" in dev else ""
-                if not self._matches(address, name):
-                    continue
-                log.warning("BlueZ still has a connection to %s (%s) from an earlier run; "
-                            "disconnecting it so the treadmill advertises again.", name, address)
-                res = await bus.call(Message(destination="org.bluez", path=path,
-                                             interface="org.bluez.Device1", member="Disconnect"))
-                if res.message_type == MessageType.ERROR:
-                    log.warning("Disconnect failed: %s", res.body)
-                else:
-                    await asyncio.sleep(2)  # give the treadmill a moment to start advertising
+            known = await self.known_treadmills()
         except Exception as exc:  # noqa: BLE001
-            log.debug("Stale-connection check skipped: %s", exc)
-        finally:
-            if bus is not None:
-                bus.disconnect()
+            log.info("Couldn't check BlueZ for a leftover connection: %s", exc)
+            return
+        if not known:
+            log.info("BlueZ doesn't know the treadmill yet.")
+        for path, address, name, connected in known:
+            log.info("BlueZ: %s (%s) connected=%s", name, address, connected)
+            if not connected:
+                continue
+            log.warning("BlueZ still holds a connection to %s; disconnecting it so the "
+                        "treadmill advertises again.", address)
+            try:
+                await self._bluez_call(path, "org.bluez.Device1", "Disconnect")
+                await asyncio.sleep(2)  # give the treadmill a moment to start advertising
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Disconnect failed: %s", exc)
 
     async def setup_notifications(self, client):
         self.log_gatt(client)
