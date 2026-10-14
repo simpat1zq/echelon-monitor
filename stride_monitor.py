@@ -54,6 +54,9 @@ INIT_STRIDE4 = [
 ]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Set by the Docker build (GitHub Actions passes the commit SHA and build time).
+APP_VERSION = os.environ.get("APP_VERSION", "dev")
+APP_BUILD_DATE = os.environ.get("APP_BUILD_DATE", "")
 
 
 class Workout:
@@ -112,6 +115,8 @@ class Workout:
             "max_speed": round(self.max_speed, 2),
             "raw": self.raw,
             "ts": time.time(),
+            "version": APP_VERSION,
+            "built": APP_BUILD_DATE,
         }
 
 
@@ -454,6 +459,8 @@ async def main_async(args):
     runner = web.AppRunner(make_app(workout))
     await runner.setup()
     await web.TCPSite(runner, args.host, args.port).start()
+    log.info("Echelon Monitor version %s%s", APP_VERSION[:7],
+             f" (built {APP_BUILD_DATE})" if APP_BUILD_DATE else "")
     log.info("Dashboard: http://%s:%d/", "localhost" if args.host in ("0.0.0.0", "") else args.host, args.port)
 
     tasks = []

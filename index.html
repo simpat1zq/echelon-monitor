@@ -28,6 +28,8 @@
   .unit { font-size: 16px; color: var(--muted); font-weight: 500; margin-left: 4px; }
   .hr .value { color: var(--hr); }
   canvas { width: 100%; height: 140px; display: block; margin-top: 8px; }
+  .version { margin-top: 12px; font-size: 12px; color: var(--muted); text-align: center; }
+  .version a { color: inherit; }
   footer { margin-top: 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
   button { background: var(--card); color: var(--text); border: 1px solid #333a46; border-radius: 8px; padding: 8px 14px; font-size: 14px; }
   code { word-break: break-all; }
@@ -57,6 +59,7 @@
   <span>Last packet: <code id="raw">–</code></span>
   <button id="reset">Reset workout</button>
 </footer>
+<div class="version" id="version">Version –</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -112,9 +115,28 @@ function render(d) {
   $("elev").textContent = Math.round(d.elevation_ft);
   $("time").textContent = fmtTime(d.moving_seconds);
   $("raw").textContent = d.raw || "–";
+  renderVersion(d);
   history.push(d.speed);
   if (history.length > MAX_POINTS) history.shift();
   draw();
+}
+
+let shownVersion = null;
+function renderVersion(d) {
+  const key = d.version + "|" + d.built;
+  if (key === shownVersion) return;
+  shownVersion = key;
+  const el = $("version");
+  el.textContent = "Version ";
+  if (d.version && d.version !== "dev") {
+    const a = document.createElement("a");
+    a.href = "https://github.com/simpat1zq/echelon-monitor/commit/" + d.version;
+    a.textContent = d.version.slice(0, 7);
+    el.appendChild(a);
+  } else {
+    el.append(d.version || "unknown");
+  }
+  if (d.built) el.append(" · built " + d.built);
 }
 
 function connect() {
