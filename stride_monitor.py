@@ -24,6 +24,7 @@ import math
 import os
 import random
 import signal
+import sqlite3
 import time
 
 from aiohttp import web
@@ -60,46 +61,185 @@ APP_VERSION = os.environ.get("APP_VERSION", "dev")
 APP_BUILD_DATE = os.environ.get("APP_BUILD_DATE", "")
 
 
+class RunStore:
+    """Saves runs and their per-second samples to SQLite."""
+
+    MIN_RUN_SECONDS = 30  # shorter runs are discarded as noise
+
+    def __init__(self, path):
+        self.db = sqlite3.connect(path)
+        self.db.row_factory = sqlite3.Row
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS runs (
+                id INTEGER PRIMARY KEY,
+                started REAL NOT NULL,
+                ended REAL,
+                moving_s REAL,
+                distance REAL,
+                dist_unit TEXT,
+                avg_speed REAL,
+                max_speed REAL,
+                elevation_ft REAL,
+                avg_hr REAL,
+                max_hr INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS samples (
+                run_id INTEGER NOT NULL,
+                t REAL NOT NULL,
+                speed REAL,
+                incline REAL,
+                hr INTEGER,
+                distance REAL,
+                elevation_ft REAL
+            );
+            CREATE INDEX IF NOT EXISTS samples_run ON samples(run_id);
+        """)
+        # Finish runs left open by a crash or restart.
+        for row in self.db.execute("SELECT id FROM runs WHERE ended IS NULL").fetchall():
+            self.finish(row["id"])
+
+    def start(self, started, dist_unit):
+        cur = self.db.execute("INSERT INTO runs (started, dist_unit) VALUES (?, ?)", (started, dist_unit))
+        self.db.commit()
+        return cur.lastrowid
+
+    def add_sample(self, run_id, t, speed, incline, hr, distance, elevation_ft):
+        self.db.execute("INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (run_id, t, speed, incline, hr or None, distance, elevation_ft))
+        self.db.commit()
+
+    def finish(self, run_id):
+        """Compute the run summary from its samples. Returns False if it was too short to keep."""
+        # Drop the idle stretch that ended the run, so it ends at the last movement.
+        last = self.db.execute("SELECT MAX(t) FROM samples WHERE run_id = ? AND speed > 0",
+                               (run_id,)).fetchone()[0]
+        if last is not None:
+            self.db.execute("DELETE FROM samples WHERE run_id = ? AND t > ?", (run_id, last + 1))
+        r = self.db.execute("""
+            SELECT MAX(t) AS ended,
+                   SUM(CASE WHEN speed > 0 THEN 1 ELSE 0 END) AS moving_s,
+                   MAX(distance) AS distance, MAX(speed) AS max_speed,
+                   MAX(elevation_ft) AS elevation_ft,
+                   AVG(hr) AS avg_hr, MAX(hr) AS max_hr
+            FROM samples WHERE run_id = ?""", (run_id,)).fetchone()
+        moving = r["moving_s"] or 0
+        if moving < self.MIN_RUN_SECONDS:
+            self.delete(run_id)
+            return False
+        distance = r["distance"] or 0.0
+        self.db.execute("""
+            UPDATE runs SET ended = ?, moving_s = ?, distance = ?, avg_speed = ?, max_speed = ?,
+                            elevation_ft = ?, avg_hr = ?, max_hr = ?
+            WHERE id = ?""",
+                        (r["ended"], moving, distance, distance / (moving / 3600.0), r["max_speed"],
+                         r["elevation_ft"], r["avg_hr"], r["max_hr"], run_id))
+        self.db.commit()
+        return True
+
+    def delete(self, run_id):
+        self.db.execute("DELETE FROM samples WHERE run_id = ?", (run_id,))
+        self.db.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        self.db.commit()
+
+    def list_runs(self):
+        rows = self.db.execute("SELECT * FROM runs WHERE ended IS NOT NULL ORDER BY started DESC")
+        return [dict(r) for r in rows]
+
+    def samples(self, run_id):
+        rows = self.db.execute("SELECT t, speed, incline, hr FROM samples WHERE run_id = ? ORDER BY t",
+                               (run_id,))
+        return [dict(r) for r in rows]
+
+
 class Workout:
-    """Current treadmill state plus values integrated over time."""
+    """Current treadmill state, the active run and values integrated over time.
 
-    def __init__(self, metric):
+    A run starts when the belt starts moving and ends automatically after
+    `idle_timeout` seconds without movement (or when ended from the page).
+    """
+
+    def __init__(self, metric, store=None, idle_timeout=180):
         self.metric = metric
-        self.reset()
-
-    def reset(self):
+        self.store = store
+        self.idle_timeout = idle_timeout
         self.connected = False
         self.device = None
         self.speed = 0.0          # in the treadmill's native unit (mph or km/h)
         self.incline = 0
         self.heart_rate = 0
+        self.hr_seen = False      # only show heart rate once the treadmill reports one
+        self.raw = ""
+        self.run_id = None
+        self.run_started = None
+        self.last_saved = None    # summary of the run that just ended
+        self._last_tick = None
+        self._last_active = None
+        self.reset_stats()
+
+    def reset_stats(self):
         self.distance = 0.0       # same unit as speed (mi or km)
         self.elevation_ft = 0.0
         self.moving_seconds = 0.0
         self.max_speed = 0.0
-        self.started_at = None
-        self._last_tick = None
-        self.raw = ""
+
+    def set_heart_rate(self, bpm):
+        if bpm:
+            self.heart_rate = bpm
+            self.hr_seen = True
 
     def tick(self):
         now = time.monotonic()
-        if self._last_tick is not None:
+        if self._last_tick is not None and self.speed > 0:
+            if self.run_id is None:
+                self.start_run()
             dt = now - self._last_tick
-            if self.speed > 0:
-                if self.started_at is None:
-                    self.started_at = time.time()
-                step = self.speed * dt / 3600.0
-                self.distance += step
-                self.moving_seconds += dt
-                miles = step if not self.metric else step / 1.60934
-                self.elevation_ft += miles * 5280 * self.incline / 100.0
+            step = self.speed * dt / 3600.0
+            self.distance += step
+            self.moving_seconds += dt
+            miles = step if not self.metric else step / 1.60934
+            self.elevation_ft += miles * 5280 * self.incline / 100.0
+            self.max_speed = max(self.max_speed, self.speed)
+        if self.speed > 0:
+            self._last_active = now
+        elif self.run_id is not None and now - self._last_active >= self.idle_timeout:
+            log.info("No movement for %ds; ending run.", self.idle_timeout)
+            self.end_run()
         self._last_tick = now
+
+    def start_run(self):
+        self.reset_stats()
+        self.last_saved = None
+        self.run_started = time.time()
+        self._last_active = time.monotonic()
+        if self.store:
+            self.run_id = self.store.start(self.run_started, "km" if self.metric else "mi")
+        else:
+            self.run_id = 0
+        log.info("Run started.")
+
+    def end_run(self):
+        if self.run_id is None:
+            return
+        kept = self.store.finish(self.run_id) if self.store else True
+        log.info("Run ended: %.2f %s in %ds%s.", self.distance, "km" if self.metric else "mi",
+                 self.moving_seconds, "" if kept else " (too short, discarded)")
+        self.last_saved = kept
+        self.run_id = None
+
+    def record_sample(self):
+        if self.run_id and self.store:
+            self.store.add_sample(self.run_id, time.time(), round(self.speed, 2), self.incline,
+                                  self.heart_rate if self.hr_seen else None,
+                                  round(self.distance, 4), round(self.elevation_ft, 1))
 
     def snapshot(self):
         unit = "km/h" if self.metric else "mph"
         pace = None
         if self.speed > 0.3:
             pace = 60.0 / self.speed  # minutes per mile/km
+        idle_left = None
+        if self.run_id is not None and self.speed <= 0 and self._last_active is not None:
+            idle_left = max(0, int(self.idle_timeout - (time.monotonic() - self._last_active)))
         return {
             "connected": self.connected,
             "device": self.device,
@@ -107,6 +247,7 @@ class Workout:
             "speed_unit": unit,
             "incline": self.incline,
             "heart_rate": self.heart_rate,
+            "hr_seen": self.hr_seen,
             "distance": round(self.distance, 3),
             "distance_unit": "km" if self.metric else "mi",
             "pace_min": pace,
@@ -114,6 +255,10 @@ class Workout:
             "elevation_ft": round(self.elevation_ft, 1),
             "moving_seconds": int(self.moving_seconds),
             "max_speed": round(self.max_speed, 2),
+            "run_active": self.run_id is not None,
+            "idle_left": idle_left,
+            "last_saved": self.last_saved,
+            "history": self.store is not None,
             "raw": self.raw,
             "ts": time.time(),
             "version": APP_VERSION,
@@ -139,6 +284,8 @@ class StrideBLE:
         self.has_echelon = True
         self.last_echelon_rx = 0.0
         self.last_ftms_rx = 0.0
+        self.last_d3 = 0.0
+        self.last_d1 = b""
 
     async def find_device(self):
         from bleak import BleakScanner
@@ -186,9 +333,7 @@ class StrideBLE:
             w.speed = kmh if w.metric else kmh / 1.60934
         if "incline" in parsed:
             w.incline = round(parsed["incline"], 1)
-        if parsed.get("heart_rate"):
-            w.heart_rate = parsed["heart_rate"]
-        w.max_speed = max(w.max_speed, w.speed)
+        w.set_heart_rate(parsed.get("heart_rate"))
         w.tick()
 
     def on_notify(self, _char, data: bytearray):
@@ -202,15 +347,24 @@ class StrideBLE:
         if len(data) < 2:
             return
         kind = data[1]
+        now = time.monotonic()
         if kind == 0xD3 and len(data) >= 5:
+            self.last_d3 = now
             w.speed = ((data[3] << 8) | data[4]) / 1000.0
         elif kind == 0xD2 and len(data) >= 4:
             w.incline = data[3]
-        elif kind == 0xD1 and self.is_stride4 and len(data) >= 9:
-            w.speed = ((data[7] << 8) | data[8]) / 100.0
-        if kind == 0xD1 and len(data) > 11 and data[11]:
-            w.heart_rate = data[11]
-        w.max_speed = max(w.max_speed, w.speed)
+        elif kind == 0xD1:
+            if bytes(data) != self.last_d1:
+                # Status packet, sent about once a second. Logged on change so
+                # its layout can be worked out from a real workout.
+                log.info("status %s", data.hex(" "))
+                self.last_d1 = bytes(data)
+            # Stride4-family consoles report speed here (hundredths). Use it
+            # unless the treadmill is also sending the older 0xD3 speed packets.
+            if len(data) >= 9 and (self.is_stride4 or now - self.last_d3 > 5):
+                w.speed = ((data[7] << 8) | data[8]) / 100.0
+            if len(data) > 11:
+                w.set_heart_rate(data[11])
         w.tick()
         # The motor base expects these packets to be echoed back as an ack.
         if kind in (0xD0, 0xD2, 0xD3):
@@ -418,10 +572,11 @@ async def demo_loop(workout):
     t0 = time.monotonic()
     while True:
         t = time.monotonic() - t0
-        workout.speed = round(3.0 + 1.5 * (1 + math.sin(t / 20)), 1)
+        # Walk for 50s, then stand still for 20s, so auto-ending runs can be tried.
+        moving = (t % 70) < 50
+        workout.speed = round(3.0 + 1.5 * (1 + math.sin(t / 20)), 1) if moving else 0.0
         workout.incline = int(3 + 3 * math.sin(t / 45))
-        workout.heart_rate = int(110 + workout.speed * 8 + random.randint(-2, 2))
-        workout.max_speed = max(workout.max_speed, workout.speed)
+        workout.set_heart_rate(int(110 + workout.speed * 8 + random.randint(-2, 2)))
         workout.tick()
         await asyncio.sleep(1)
 
@@ -447,13 +602,33 @@ def make_app(workout):
     async def index(_request):
         return web.FileResponse(os.path.join(HERE, "index.html"))
 
+    async def runs_page(_request):
+        return web.FileResponse(os.path.join(HERE, "runs.html"))
+
+    async def runs_api(_request):
+        if not workout.store:
+            return web.json_response({"history": False, "runs": []})
+        return web.json_response({"history": True, "runs": workout.store.list_runs()})
+
+    async def run_samples(request):
+        if not workout.store:
+            raise web.HTTPNotFound()
+        return web.json_response(workout.store.samples(int(request.match_info["run_id"])))
+
+    async def run_delete(request):
+        if not workout.store:
+            raise web.HTTPNotFound()
+        run_id = int(request.match_info["run_id"])
+        if run_id == workout.run_id:
+            return web.json_response({"ok": False, "error": "run in progress"}, status=409)
+        workout.store.delete(run_id)
+        return web.json_response({"ok": True})
+
     async def state(_request):
         return web.json_response(workout.snapshot())
 
-    async def reset(_request):
-        connected, device = workout.connected, workout.device
-        workout.reset()
-        workout.connected, workout.device = connected, device
+    async def end_run(_request):
+        workout.end_run()
         return web.json_response({"ok": True})
 
     async def ws_handler(request):
@@ -473,6 +648,10 @@ def make_app(workout):
             while True:
                 await asyncio.sleep(1)
                 workout.tick()
+                try:
+                    workout.record_sample()
+                except sqlite3.Error as exc:
+                    log.warning("Couldn't save sample: %s", exc)
                 msg = json.dumps(workout.snapshot())
                 for ws in list(clients):
                     try:
@@ -486,7 +665,11 @@ def make_app(workout):
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/api/state", state)
-    app.router.add_post("/api/reset", reset)
+    app.router.add_post("/api/end", end_run)
+    app.router.add_get("/runs", runs_page)
+    app.router.add_get("/api/runs", runs_api)
+    app.router.add_get("/api/runs/{run_id:\\d+}/samples", run_samples)
+    app.router.add_delete("/api/runs/{run_id:\\d+}", run_delete)
     app.router.add_get("/ws", ws_handler)
     app.cleanup_ctx.append(broadcaster)
     return app
@@ -503,7 +686,11 @@ async def scan_only():
 
 
 async def main_async(args):
-    workout = Workout(metric=args.metric)
+    store = None
+    if args.db:
+        store = RunStore(args.db)
+        log.info("Saving runs to %s", args.db)
+    workout = Workout(metric=args.metric, store=store, idle_timeout=args.idle_timeout)
     runner = web.AppRunner(make_app(workout))
     await runner.setup()
     await web.TCPSite(runner, args.host, args.port).start()
@@ -535,6 +722,7 @@ async def main_async(args):
     except asyncio.CancelledError:
         pass
     finally:
+        workout.end_run()
         await runner.cleanup()
         log.info("Stopped.")
 
@@ -548,7 +736,10 @@ def main():
     p.add_argument("--protocol", choices=["auto", "generic", "stride4"], default="auto",
                    help="init sequence/speed decoding; auto picks stride4 only for names starting STRIDE4")
     p.add_argument("--metric", action="store_true", help="treadmill reports km/h instead of mph")
-    p.add_argument("--csv", help="append per-second samples to this CSV file")
+    p.add_argument("--db", help="SQLite file to save runs in (enables the runs page)")
+    p.add_argument("--idle-timeout", type=int, default=180,
+                   help="end a run after this many seconds without movement (default 180)")
+    p.add_argument("--csv", help="also append per-second samples to this CSV file")
     p.add_argument("--demo", action="store_true", help="generate fake data (no treadmill needed)")
     p.add_argument("--scan", action="store_true", help="list nearby BLE devices and exit")
     p.add_argument("--debug", action="store_true", help="log raw BLE packets")

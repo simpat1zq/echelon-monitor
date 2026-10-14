@@ -23,7 +23,7 @@ services:
     # Add "--protocol", "stride4" if it connects but the speed never updates.
     command:
       - --port=8080
-      - --csv=/data/workouts.csv
+      - --db=/data/echelon.db
       - --address=E6:4B:2D:DE:6E:51
       - --debug
     networks:

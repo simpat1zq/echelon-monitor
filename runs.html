@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Treadmill Runs</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #1a1d24; --text: #f2f4f8; --muted: #8b93a3;
+    --accent: #4fc3f7; --hr: #ff7070; --line: #2a2f3a; --bad: #ef5350;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  nav a { color: var(--accent); text-decoration: none; font-size: 15px; }
+  .totals { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+  .tile { background: var(--card); border-radius: 14px; padding: 12px 14px; }
+  .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .num { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .unit { font-size: 13px; color: var(--muted); font-weight: 500; margin-left: 3px; }
+  .run { background: var(--card); border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; cursor: pointer; }
+  .run-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .when { font-weight: 600; }
+  .dist { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent); white-space: nowrap; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px 12px; margin-top: 10px; }
+  .stat .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat.hr .v { color: var(--hr); }
+  .detail { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+  canvas { width: 100%; height: 130px; display: block; }
+  .actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+  button { background: transparent; color: var(--bad); border: 1px solid #4a2b2b; border-radius: 8px; padding: 6px 12px; font-size: 13px; }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Runs</h1>
+  <nav><a href="/">Live</a></nav>
+</header>
+
+<div class="totals" id="totals" hidden>
+  <div class="tile"><div class="label">Runs</div><div class="num" id="tRuns">0</div></div>
+  <div class="tile"><div class="label">Distance</div><div class="num"><span id="tDist">0</span><span class="unit" id="tDistUnit">mi</span></div></div>
+  <div class="tile"><div class="label">Time</div><div class="num" id="tTime">0:00</div></div>
+</div>
+
+<div id="list"><div class="empty">Loading…</div></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function fmtTime(s) {
+  s = Math.round(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+}
+function fmtPace(speed) {
+  if (!speed || speed < 0.3) return "--";
+  const min = 60 / speed, m = Math.floor(min), s = Math.round((min - m) * 60);
+  return s === 60 ? (m + 1) + ":00" : m + ":" + String(s).padStart(2, "0");
+}
+function fmtWhen(epoch) {
+  const d = new Date(epoch * 1000);
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }) +
+    " · " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function stat(label, value, unit, cls) {
+  const s = el("div", "stat" + (cls ? " " + cls : ""));
+  s.append(el("div", "label", label));
+  const v = el("div", "v", value);
+  if (unit) v.append(el("span", "unit", unit));
+  s.append(v);
+  return s;
+}
+
+function drawChart(canvas, samples) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  if (samples.length < 2) return;
+  const t0 = samples[0].t, t1 = samples[samples.length - 1].t;
+  const max = Math.max(4, ...samples.map((p) => p.speed)) * 1.1;
+  ctx.strokeStyle = "#2a2f3a"; ctx.fillStyle = "#8b93a3"; ctx.font = "11px system-ui"; ctx.lineWidth = 1;
+  for (let v = 0; v <= max; v += max > 8 ? 2 : 1) {
+    const y = h - (v / max) * h;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.fillText(v, 2, y - 2);
+  }
+  ctx.beginPath();
+  samples.forEach((p, i) => {
+    const x = ((p.t - t0) / (t1 - t0 || 1)) * w, y = h - (p.speed / max) * h;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.strokeStyle = "#4fc3f7"; ctx.lineWidth = 2; ctx.stroke();
+}
+
+async function toggleDetail(card, run) {
+  const open = card.querySelector(".detail");
+  if (open) { open.remove(); return; }
+  const detail = el("div", "detail");
+  const canvas = document.createElement("canvas");
+  detail.append(el("div", "label", "Speed"), canvas);
+  const actions = el("div", "actions");
+  const del = el("button", null, "Delete run");
+  del.onclick = async (e) => {
+    e.stopPropagation();
+    if (!confirm("Delete this run? This can't be undone.")) return;
+    const r = await fetch("/api/runs/" + run.id, { method: "DELETE" });
+    if (r.ok) load();
+  };
+  actions.append(del);
+  detail.append(actions);
+  detail.onclick = (e) => e.stopPropagation();
+  card.append(detail);
+  const samples = await (await fetch("/api/runs/" + run.id + "/samples")).json();
+  drawChart(canvas, samples);
+}
+
+async function load() {
+  const data = await (await fetch("/api/runs")).json();
+  const list = $("list");
+  list.textContent = "";
+  if (!data.history) {
+    list.append(el("div", "empty", "Run history is off. Start the app with --db to save runs."));
+    return;
+  }
+  const runs = data.runs;
+  if (!runs.length) {
+    list.append(el("div", "empty", "No runs yet. Runs are saved automatically when the belt stops for 3 minutes."));
+    return;
+  }
+  const unit = runs[0].dist_unit || "mi", speedUnit = unit === "km" ? "km/h" : "mph";
+  $("totals").hidden = false;
+  $("tRuns").textContent = runs.length;
+  $("tDist").textContent = runs.reduce((a, r) => a + (r.distance || 0), 0).toFixed(1);
+  $("tDistUnit").textContent = unit;
+  $("tTime").textContent = fmtTime(runs.reduce((a, r) => a + (r.moving_s || 0), 0));
+
+  for (const r of runs) {
+    const card = el("div", "run");
+    const head = el("div", "run-head");
+    head.append(el("div", "when", fmtWhen(r.started)));
+    const dist = el("div", "dist", (r.distance || 0).toFixed(2));
+    dist.append(el("span", "unit", r.dist_unit || unit));
+    head.append(dist);
+    const stats = el("div", "stats");
+    stats.append(stat("Time", fmtTime(r.moving_s || 0)));
+    stats.append(stat("Avg pace", fmtPace(r.avg_speed), "/" + (r.dist_unit || unit)));
+    stats.append(stat("Avg speed", (r.avg_speed || 0).toFixed(1), speedUnit));
+    stats.append(stat("Max speed", (r.max_speed || 0).toFixed(1), speedUnit));
+    stats.append(stat("Climb", Math.round(r.elevation_ft || 0), "ft"));
+    if (r.avg_hr) stats.append(stat("Avg HR", Math.round(r.avg_hr), "bpm", "hr"));
+    card.append(head, stats);
+    card.onclick = () => toggleDetail(card, r);
+    list.append(card);
+  }
+}
+
+load();
+</script>
+</body>
+</html>

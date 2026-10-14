@@ -40,7 +40,9 @@ Useful options:
 | `--name TEXT` | Scan for a device whose name contains TEXT, if yours doesn't contain `STRIDE` |
 | `--protocol generic\|stride4` | Force a startup sequence. The default picks `stride4` only when the name starts with `STRIDE4`. Try the other one if the speed never updates |
 | `--metric` | Use this if the console is set to km/h |
-| `--csv workout.csv` | Write one sample per second to a CSV file |
+| `--db runs.db` | Save runs to a SQLite file and turn on the Runs page (`/runs`) |
+| `--idle-timeout 180` | End a run after this many seconds without belt movement |
+| `--csv workout.csv` | Also write one sample per second to a CSV file |
 | `--demo` | Show fake data so you can try the page without the treadmill |
 | `--debug` | Log every raw BLE packet (useful if a value looks wrong) |
 
@@ -95,6 +97,15 @@ To test the page without the treadmill:
 treadmill's metal frame cut that down. If the logs show repeated disconnects,
 use a USB Bluetooth 5.0 dongle on a USB extension cable placed closer to the
 treadmill.
+
+## Runs
+
+A run starts automatically when the belt starts moving. It ends when the belt has
+been stopped for 3 minutes (`--idle-timeout`), or when you tap **End run**. The
+idle stretch at the end isn't counted. Runs shorter than 30 seconds are
+discarded. Saved runs are listed at `/runs`, where you can tap a run to see its
+speed chart or delete it. Heart rate only appears once the treadmill reports
+one.
 
 ## What's measured
 
