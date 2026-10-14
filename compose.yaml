@@ -1,4 +1,5 @@
-# Deployed by Komodo from this repo (run directory: repo root).
+# Deployed by Komodo from this repo (run directory: repo root). The image is
+# built by GitHub Actions on every push to main and pulled from GHCR.
 # Bluetooth is handled by the host's BlueZ service; the container reaches it
 # through the host's system D-Bus socket, so no host networking or privileged
 # mode is needed. Caddy reaches the dashboard as echelon:8080 on arrstack.
@@ -8,8 +9,7 @@ networks:
 
 services:
   echelon:
-    build: .
-    pull_policy: build             # rebuild on every deploy so pushed changes take effect
+    image: ghcr.io/simpat1zq/echelon-monitor:latest
     container_name: echelon
     environment:
       - TZ=America/New_York

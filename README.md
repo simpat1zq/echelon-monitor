@@ -68,10 +68,12 @@ Bluetooth stack, host networking or `--privileged`.
    `arrstack` network that Caddy is on and stores data in
    `/mnt/wd1/echelon/data`. In Komodo, create a Stack that points at this repo,
    branch `main`, with the default run directory and compose file. Click
-   **Deploy** after each push to rebuild it. Without Komodo:
+   **Deploy** after each push to pull the new image. GitHub Actions builds
+   `ghcr.io/simpat1zq/echelon-monitor:latest` on every push to `main`, so wait
+   for that run to finish first (about 1–2 minutes). Without Komodo:
 
    ```bash
-   docker compose up -d --build
+   docker compose up -d
    docker logs -f echelon        # wait for "Connected. Streaming data."
    ```
 
