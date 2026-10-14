@@ -76,6 +76,6 @@ echo "$FOUND" | while read -r _ mac name; do
     else echo "       signal is very weak and likely to drop; move the PC or a dongle closer"
     fi
   fi
-  echo "       Put this in docker-compose.yml:  --address $mac"
+  echo "       Put this in compose.yaml:  --address=$mac"
 done
-echo; echo "Looks good. Next: docker compose up -d --build"
+echo; echo "Looks good. Next: deploy the stack (Komodo, or docker compose up -d --build)"

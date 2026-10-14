@@ -1,0 +1,31 @@
+# Deployed by Komodo from this repo (run directory: repo root).
+# Bluetooth is handled by the host's BlueZ service; the container reaches it
+# through the host's system D-Bus socket, so no host networking or privileged
+# mode is needed. Caddy reaches the dashboard as echelon:8080 on arrstack.
+networks:
+  arrstack:
+    external: true
+
+services:
+  echelon:
+    build: .
+    image: echelon-monitor:local
+    container_name: echelon
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/wd1/echelon/data:/data
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+      - /etc/localtime:/etc/localtime:ro
+    security_opt:
+      - apparmor:unconfined
+    # --debug logs every BLE packet; drop it once the treadmill data looks right.
+    # Add "--protocol", "stride4" if it connects but the speed never updates.
+    command:
+      - --port=8080
+      - --csv=/data/workouts.csv
+      - --address=E6:4B:2D:DE:6E:51
+      - --debug
+    networks:
+      - arrstack
+    restart: always

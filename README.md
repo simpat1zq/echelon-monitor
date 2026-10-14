@@ -1,4 +1,4 @@
-# Stride Monitor
+# Echelon Monitor
 
 Live web dashboard for an **Echelon Stride / Stride-4s** treadmill that skips the
 tablet and the Echelon app. It talks to the treadmill's motor base over
@@ -51,7 +51,7 @@ the `bluetooth` group.
 
 Bluetooth stays on the host. The container talks to the host's BlueZ service
 through the system D-Bus socket, so the container doesn't need its own
-Bluetooth stack or `--privileged`.
+Bluetooth stack, host networking or `--privileged`.
 
 1. **Check the host first** (not in Docker). Turn the treadmill on and the
    tablet's Bluetooth off, then run:
@@ -61,32 +61,38 @@ Bluetooth stack or `--privileged`.
    ```
 
    It checks the Bluetooth adapter, the BlueZ service and the D-Bus socket. Then it
-   scans for 20 seconds and prints the treadmill's address and signal strength. If
-   it says a check failed, fix that check before going further.
+   scans for 20 seconds and prints the treadmill's address. Put that address in
+   `compose.yaml` (`--address=...`).
 
-2. **Optional:** put the address it printed into `docker-compose.yml`:
-
-   ```yaml
-   command: ["--port", "8080", "--csv", "/data/workouts.csv", "--address", "AA:BB:CC:DD:EE:FF"]
-   ```
-
-3. **Start it:**
+2. **Deploy.** `compose.yaml` is set up for the home server: it joins the external
+   `arrstack` network that Caddy is on and stores data in
+   `/mnt/wd1/echelon/data`. In Komodo, create a Stack that points at this repo,
+   branch `main`, with the default run directory and compose file. Click
+   **Deploy** after each push to rebuild it. Without Komodo:
 
    ```bash
    docker compose up -d --build
-   docker compose logs -f        # wait for "Connected. Streaming data."
+   docker logs -f echelon        # wait for "Connected. Streaming data."
    ```
 
-4. Open `http://<pc-ip>:8080/` on your phone. Workouts are saved to
-   `./data/workouts.csv`.
+3. **Caddy:**
+
+   ```
+   echelon.sphome.top {
+   	tls internal
+   	reverse_proxy echelon:8080
+   }
+   ```
+
+   Caddy proxies the live WebSocket with no extra settings.
 
 To test the page without the treadmill:
-`docker compose run --rm stride-monitor --demo`.
+`docker compose run --rm echelon --demo`.
 
 **Range:** Bluetooth LE normally reaches about 30 ft (10 m), but walls and the
-treadmill's metal frame cut that down. If `check_host.sh` reports a weak signal,
-or the logs show repeated disconnects, use a cheap USB Bluetooth 5.0 dongle on a
-USB extension cable placed closer to the treadmill.
+treadmill's metal frame cut that down. If the logs show repeated disconnects,
+use a USB Bluetooth 5.0 dongle on a USB extension cable placed closer to the
+treadmill.
 
 ## What's measured
 
