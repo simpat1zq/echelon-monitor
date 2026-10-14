@@ -124,6 +124,10 @@ are calculated. They can drift slightly from what the console shows.
 - **"Can't reach the Bluetooth service" (in Docker)**: the host's
   `bluetooth` service isn't running, or the D-Bus socket isn't mounted. Run
   `check_host.sh` on the host.
+- **It only reconnects after power-cycling the treadmill**: once a client
+  disconnects, the Stride-4s stops advertising. So on shutdown the app leaves the
+  Bluetooth link open in BlueZ (on the host), and the next start picks it back up.
+  Use `--disconnect-on-exit` to turn this off.
 - **"Treadmill not found"**: make sure the belt is powered on and the tablet isn't
   connected. Run `--scan` and look for a device marked `<-- Echelon service`, then
   pass it with `--address`.

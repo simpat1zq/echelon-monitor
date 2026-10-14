@@ -271,8 +271,9 @@ def checksum(data):
 
 
 class StrideBLE:
-    def __init__(self, workout, address, name_prefix, debug, protocol="auto"):
+    def __init__(self, workout, address, name_prefix, debug, protocol="auto", disconnect_on_exit=False):
         self.workout = workout
+        self.disconnect_on_exit = disconnect_on_exit
         self.protocol = protocol
         self.address = address
         self.name_prefix = name_prefix.upper()
@@ -290,6 +291,18 @@ class StrideBLE:
     async def find_device(self):
         from bleak import BleakScanner
 
+        try:
+            known = await self.known_treadmills()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("BlueZ lookup failed: %s", exc)
+            known = []
+        for path, address, name, connected in known:
+            if connected:
+                from bleak.backends.device import BLEDevice
+
+                log.info("BlueZ is still connected to %s; picking that connection back up.", address)
+                return BLEDevice(address, name, {"path": path, "props": {}})
+
         if self.address:
             log.info("Scanning for %s ...", self.address)
             device = await BleakScanner.find_device_by_address(self.address, timeout=15)
@@ -302,20 +315,13 @@ class StrideBLE:
             )
         if device is not None:
             return device
-        # The scan can miss a treadmill BlueZ already knows (or is still connected
-        # to). Connecting through BlueZ's device path doesn't need a fresh scan
-        # result, and bleak reuses an existing connection if there is one.
-        try:
-            known = await self.known_treadmills()
-        except Exception as exc:  # noqa: BLE001
-            log.debug("BlueZ lookup failed: %s", exc)
-            return None
+        # The scan can miss a treadmill BlueZ already knows. Connecting through
+        # its BlueZ device path doesn't need a fresh scan result.
         if known:
             from bleak.backends.device import BLEDevice
 
-            path, address, name, connected = known[0]
-            log.info("Not seen in the scan; trying a direct connection to %s (BlueZ connected=%s).",
-                     address, connected)
+            path, address, name, _ = known[0]
+            log.info("Not seen in the scan; trying a direct connection to %s.", address)
             return BLEDevice(address, name, {"path": path, "props": {}})
         return None
 
@@ -398,14 +404,11 @@ class StrideBLE:
     async def run_forever(self):
         from bleak import BleakClient
 
-        # A previous run that died without disconnecting leaves BlueZ holding the
-        # link, and the treadmill stops advertising until it's power-cycled.
-        await self.release_stale_connection()
         while True:
+            client = None
             try:
                 device = await self.find_device()
                 if device is None:
-                    await self.release_stale_connection()
                     log.warning("Treadmill not found. Is it powered on, and is the "
                                 "tablet/app disconnected? Retrying in 5s.")
                     await asyncio.sleep(5)
@@ -418,31 +421,40 @@ class StrideBLE:
                 log.info("Connecting to %s (%s)%s", name, device.address,
                          " [Stride4 mode]" if self.is_stride4 else "")
                 disconnected = asyncio.Event()
-                async with BleakClient(device, disconnected_callback=lambda _c: disconnected.set()) as client:
-                    self.client = client
-                    await self.setup_notifications(client)
-                    await self.send_init()
-                    self.workout.connected = True
-                    self.workout.device = name or device.address
-                    log.info("Connected. Streaming data.")
-                    connected_at = time.monotonic()
-                    switched = False
-                    while not disconnected.is_set():
-                        if (not switched and self.protocol == "auto" and not self.last_echelon_rx
-                                and not self.last_ftms_rx and time.monotonic() - connected_at > 10):
-                            switched = True
-                            self.is_stride4 = not self.is_stride4
-                            log.warning("No data after 10s; retrying with the %s init sequence.",
-                                        "stride4" if self.is_stride4 else "generic")
-                            await self.send_init()
-                        await self.send_poll()
-                        try:
-                            await asyncio.wait_for(disconnected.wait(), timeout=2)
-                        except asyncio.TimeoutError:
-                            pass
+                client = BleakClient(device, disconnected_callback=lambda _c: disconnected.set())
+                await client.connect()
+                self.client = client
+                await self.setup_notifications(client)
+                await self.send_init()
+                self.workout.connected = True
+                self.workout.device = name or device.address
+                log.info("Connected. Streaming data.")
+                connected_at = time.monotonic()
+                switched = False
+                while not disconnected.is_set():
+                    if (not switched and self.protocol == "auto" and not self.last_echelon_rx
+                            and not self.last_ftms_rx and time.monotonic() - connected_at > 10):
+                        switched = True
+                        self.is_stride4 = not self.is_stride4
+                        log.warning("No data after 10s; retrying with the %s init sequence.",
+                                    "stride4" if self.is_stride4 else "generic")
+                        await self.send_init()
+                    await self.send_poll()
+                    try:
+                        await asyncio.wait_for(disconnected.wait(), timeout=2)
+                    except asyncio.TimeoutError:
+                        pass
                 log.warning("Treadmill disconnected.")
             except asyncio.CancelledError:
-                log.info("Disconnected from the treadmill.")
+                # Shutting down. Once disconnected, the Stride-4s stops advertising
+                # until it's power-cycled, so by default leave the link to BlueZ
+                # (which runs on the host and outlives this process); the next
+                # start picks the same connection back up.
+                if client is not None and client.is_connected and self.disconnect_on_exit:
+                    await client.disconnect()
+                    log.info("Disconnected from the treadmill.")
+                elif client is not None and client.is_connected:
+                    log.info("Leaving the Bluetooth link open for the next start.")
                 raise
             except FileNotFoundError:
                 log.error("Can't reach the Bluetooth service (BlueZ) over D-Bus. On the host, run "
@@ -450,6 +462,11 @@ class StrideBLE:
                 await asyncio.sleep(10)
             except Exception as exc:  # noqa: BLE001
                 log.warning("BLE error: %s", exc)
+                if client is not None:
+                    try:
+                        await client.disconnect()
+                    except Exception:  # noqa: BLE001
+                        pass
             self.workout.connected = False
             self.workout.speed = 0.0
             await asyncio.sleep(3)
@@ -487,27 +504,6 @@ class StrideBLE:
                 connected = bool(dev["Connected"].value) if "Connected" in dev else False
                 found.append((path, address, name, connected))
         return found
-
-    async def release_stale_connection(self):
-        """Disconnect the treadmill if BlueZ still holds a connection to it."""
-        try:
-            known = await self.known_treadmills()
-        except Exception as exc:  # noqa: BLE001
-            log.info("Couldn't check BlueZ for a leftover connection: %s", exc)
-            return
-        if not known:
-            log.info("BlueZ doesn't know the treadmill yet.")
-        for path, address, name, connected in known:
-            log.info("BlueZ: %s (%s) connected=%s", name, address, connected)
-            if not connected:
-                continue
-            log.warning("BlueZ still holds a connection to %s; disconnecting it so the "
-                        "treadmill advertises again.", address)
-            try:
-                await self._bluez_call(path, "org.bluez.Device1", "Disconnect")
-                await asyncio.sleep(2)  # give the treadmill a moment to start advertising
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Disconnect failed: %s", exc)
 
     async def setup_notifications(self, client):
         self.log_gatt(client)
@@ -736,7 +732,8 @@ async def main_async(args):
     if args.demo:
         tasks.append(asyncio.create_task(demo_loop(workout)))
     else:
-        ble = StrideBLE(workout, args.address, args.name, args.debug, args.protocol)
+        ble = StrideBLE(workout, args.address, args.name, args.debug, args.protocol,
+                        args.disconnect_on_exit)
         tasks.append(asyncio.create_task(ble.run_forever()))
     if args.csv:
         tasks.append(asyncio.create_task(csv_logger(workout, args.csv)))
@@ -776,6 +773,9 @@ def main():
     p.add_argument("--csv", help="also append per-second samples to this CSV file")
     p.add_argument("--demo", action="store_true", help="generate fake data (no treadmill needed)")
     p.add_argument("--scan", action="store_true", help="list nearby BLE devices and exit")
+    p.add_argument("--disconnect-on-exit", action="store_true",
+                   help="drop the Bluetooth link on shutdown (by default it's left to BlueZ so a "
+                        "restart can reuse it)")
     p.add_argument("--debug", action="store_true", help="log raw BLE packets")
     args = p.parse_args()
 
