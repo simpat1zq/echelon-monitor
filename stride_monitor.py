@@ -117,8 +117,9 @@ def checksum(data):
 
 
 class StrideBLE:
-    def __init__(self, workout, address, name_prefix, debug):
+    def __init__(self, workout, address, name_prefix, debug, protocol="auto"):
         self.workout = workout
+        self.protocol = protocol
         self.address = address
         self.name_prefix = name_prefix.upper()
         self.debug = debug
@@ -185,7 +186,10 @@ class StrideBLE:
                     await asyncio.sleep(5)
                     continue
                 name = device.name or ""
-                self.is_stride4 = name.upper().startswith("STRIDE4")
+                if self.protocol == "auto":
+                    self.is_stride4 = name.upper().startswith("STRIDE4")
+                else:
+                    self.is_stride4 = self.protocol == "stride4"
                 log.info("Connecting to %s (%s)%s", name, device.address,
                          " [Stride4 mode]" if self.is_stride4 else "")
                 disconnected = asyncio.Event()
@@ -325,7 +329,7 @@ async def main_async(args):
     if args.demo:
         tasks.append(asyncio.create_task(demo_loop(workout)))
     else:
-        ble = StrideBLE(workout, args.address, args.name, args.debug)
+        ble = StrideBLE(workout, args.address, args.name, args.debug, args.protocol)
         tasks.append(asyncio.create_task(ble.run_forever()))
     if args.csv:
         tasks.append(asyncio.create_task(csv_logger(workout, args.csv)))
@@ -338,6 +342,8 @@ def main():
     p.add_argument("--name", default="STRIDE", help="text the BLE name must contain (default: STRIDE)")
     p.add_argument("--host", default="0.0.0.0", help="web server bind address")
     p.add_argument("--port", type=int, default=8080, help="web server port (default 8080)")
+    p.add_argument("--protocol", choices=["auto", "generic", "stride4"], default="auto",
+                   help="init sequence/speed decoding; auto picks stride4 only for names starting STRIDE4")
     p.add_argument("--metric", action="store_true", help="treadmill reports km/h instead of mph")
     p.add_argument("--csv", help="append per-second samples to this CSV file")
     p.add_argument("--demo", action="store_true", help="generate fake data (no treadmill needed)")

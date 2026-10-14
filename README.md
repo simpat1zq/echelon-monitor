@@ -38,6 +38,7 @@ Useful options:
 | --- | --- |
 | `--address AA:BB:..` | Connect to this device instead of scanning (on macOS, use the UUID that `--scan` prints) |
 | `--name TEXT` | Scan for a device whose name contains TEXT, if yours doesn't contain `STRIDE` |
+| `--protocol generic\|stride4` | Force a startup sequence. The default picks `stride4` only when the name starts with `STRIDE4`. Try the other one if the speed never updates |
 | `--metric` | Use this if the console is set to km/h |
 | `--csv workout.csv` | Write one sample per second to a CSV file |
 | `--demo` | Show fake data so you can try the page without the treadmill |
