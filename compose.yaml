@@ -9,7 +9,6 @@ networks:
 services:
   echelon:
     build: .
-    image: echelon-monitor:local   # just the name of the locally built image; never pulled
     pull_policy: build             # rebuild on every deploy so pushed changes take effect
     container_name: echelon
     environment:
