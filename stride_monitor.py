@@ -36,6 +36,9 @@ NOTIFY_UUIDS = (
     "0bf669f4-45f2-11e7-9598-0800200c9a66",
 )
 
+FTMS_SERVICE = "00001826-0000-1000-8000-00805f9b34fb"
+FTMS_TREADMILL_DATA = "00002acd-0000-1000-8000-00805f9b34fb"
+
 INIT_GENERIC = [
     "f0a40094",
     "f0a10091", "f0a10091", "f0a10091", "f0a10091",
@@ -126,6 +129,10 @@ class StrideBLE:
         self.client = None
         self.is_stride4 = False
         self.poll_counter = 1
+        self.write_response = True
+        self.has_echelon = True
+        self.last_echelon_rx = 0.0
+        self.last_ftms_rx = 0.0
 
     async def find_device(self):
         from bleak import BleakScanner
@@ -144,12 +151,47 @@ class StrideBLE:
         data = bytes.fromhex(hexstr_or_bytes) if isinstance(hexstr_or_bytes, str) else bytes(hexstr_or_bytes)
         if self.debug:
             log.debug("TX %s", data.hex(" "))
-        await self.client.write_gatt_char(WRITE_UUID, data, response=False)
+        await self.client.write_gatt_char(WRITE_UUID, data, response=self.write_response)
+
+    def log_gatt(self, client):
+        log.info("GATT services offered by the treadmill:")
+        for service in client.services:
+            log.info("  service %s  %s", service.uuid, service.description)
+            for char in service.characteristics:
+                log.info("    char %s  [%s]  %s", char.uuid, ",".join(char.properties), char.description)
+
+    def on_other_notify(self, char, data: bytearray):
+        log.info("RX(other %s) %s", char.uuid[4:8], data.hex(" "))
+
+    def on_ftms(self, _char, data: bytearray):
+        """Standard Bluetooth FTMS Treadmill Data (0x2ACD)."""
+        w = self.workout
+        if self.debug:
+            log.debug("RX(ftms) %s", data.hex(" "))
+        w.raw = "ftms " + data.hex(" ")
+        self.last_ftms_rx = time.monotonic()
+        try:
+            parsed = parse_ftms_treadmill(bytes(data))
+        except (IndexError, ValueError) as exc:
+            log.debug("FTMS parse error: %s", exc)
+            return
+        if "speed_kmh" in parsed:
+            kmh = parsed["speed_kmh"]
+            w.speed = kmh if w.metric else kmh / 1.60934
+        if "incline" in parsed:
+            w.incline = round(parsed["incline"], 1)
+        if parsed.get("heart_rate"):
+            w.heart_rate = parsed["heart_rate"]
+        w.max_speed = max(w.max_speed, w.speed)
+        w.tick()
 
     def on_notify(self, _char, data: bytearray):
         w = self.workout
         if self.debug:
             log.debug("RX %s", data.hex(" "))
+        self.last_echelon_rx = time.monotonic()
+        if self.last_ftms_rx and time.monotonic() - self.last_ftms_rx < 5:
+            return  # FTMS data is flowing and is the better source
         w.raw = data.hex(" ")
         if len(data) < 2:
             return
@@ -195,15 +237,21 @@ class StrideBLE:
                 disconnected = asyncio.Event()
                 async with BleakClient(device, disconnected_callback=lambda _c: disconnected.set()) as client:
                     self.client = client
-                    for uuid in NOTIFY_UUIDS:
-                        await client.start_notify(uuid, self.on_notify)
-                    for cmd in INIT_STRIDE4 if self.is_stride4 else INIT_GENERIC:
-                        await self.write(cmd)
-                        await asyncio.sleep(0.3)
+                    await self.setup_notifications(client)
+                    await self.send_init()
                     self.workout.connected = True
                     self.workout.device = name or device.address
                     log.info("Connected. Streaming data.")
+                    connected_at = time.monotonic()
+                    switched = False
                     while not disconnected.is_set():
+                        if (not switched and self.protocol == "auto" and not self.last_echelon_rx
+                                and not self.last_ftms_rx and time.monotonic() - connected_at > 10):
+                            switched = True
+                            self.is_stride4 = not self.is_stride4
+                            log.warning("No data after 10s; retrying with the %s init sequence.",
+                                        "stride4" if self.is_stride4 else "generic")
+                            await self.send_init()
                         await self.send_poll()
                         try:
                             await asyncio.wait_for(disconnected.wait(), timeout=2)
@@ -220,11 +268,94 @@ class StrideBLE:
             self.workout.speed = 0.0
             await asyncio.sleep(3)
 
+    async def setup_notifications(self, client):
+        self.log_gatt(client)
+        self.last_echelon_rx = self.last_ftms_rx = 0.0
+        write_char = client.services.get_characteristic(WRITE_UUID)
+        self.has_echelon = write_char is not None
+        if self.has_echelon:
+            # Qt (and so QZ) writes with response by default; only skip the
+            # response if the characteristic can't do it.
+            self.write_response = "write" in write_char.properties
+            log.info("Writing commands %s response.", "with" if self.write_response else "without")
+        else:
+            log.warning("No Echelon command characteristic; relying on other services only.")
+        for char in [c for svc in client.services for c in svc.characteristics]:
+            if not {"notify", "indicate"} & set(char.properties):
+                continue
+            uuid = char.uuid.lower()
+            if uuid in NOTIFY_UUIDS:
+                handler = self.on_notify
+            elif uuid == FTMS_TREADMILL_DATA:
+                handler = self.on_ftms
+            else:
+                handler = self.on_other_notify
+            try:
+                await client.start_notify(char, handler)
+                log.info("Subscribed to %s", uuid)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Couldn't subscribe to %s: %s", uuid, exc)
+
+    async def send_init(self):
+        if not self.has_echelon:
+            return
+        for cmd in INIT_STRIDE4 if self.is_stride4 else INIT_GENERIC:
+            try:
+                await self.write(cmd)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("init write %s failed: %s", cmd, exc)
+            await asyncio.sleep(0.3)
+
     async def send_poll(self):
+        if not self.has_echelon:
+            return
         pkt = [0xF0, 0xA0, 0x01, self.poll_counter]
         pkt.append(checksum(pkt))
         self.poll_counter = self.poll_counter + 1 if self.poll_counter < 255 else 1
         await self.write(pkt)
+
+
+def parse_ftms_treadmill(data):
+    """Decode a Bluetooth FTMS Treadmill Data characteristic value."""
+    flags = int.from_bytes(data[0:2], "little")
+    i = 2
+    out = {}
+
+    def take(n, signed=False):
+        nonlocal i
+        if i + n > len(data):
+            raise IndexError("short FTMS packet")
+        v = int.from_bytes(data[i:i + n], "little", signed=signed)
+        i += n
+        return v
+
+    if not flags & 0x0001:            # bit 0 clear = instantaneous speed present
+        out["speed_kmh"] = take(2) / 100.0
+    if flags & 0x0002:                # average speed
+        take(2)
+    if flags & 0x0004:                # total distance (m)
+        out["distance_m"] = take(3)
+    if flags & 0x0008:                # inclination + ramp angle
+        out["incline"] = take(2, signed=True) / 10.0
+        take(2, signed=True)
+    if flags & 0x0010:                # elevation gain +/-
+        take(2)
+        take(2)
+    if flags & 0x0020:                # instantaneous pace
+        take(1)
+    if flags & 0x0040:                # average pace
+        take(1)
+    if flags & 0x0080:                # energy: total, per hour, per minute
+        take(2)
+        take(2)
+        take(1)
+    if flags & 0x0100:                # heart rate
+        out["heart_rate"] = take(1)
+    if flags & 0x0200:                # metabolic equivalent
+        take(1)
+    if flags & 0x0400:                # elapsed time (s)
+        out["elapsed_s"] = take(2)
+    return out
 
 
 async def demo_loop(workout):
@@ -353,8 +484,8 @@ def main():
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    if not args.debug:
-        logging.getLogger("bleak").setLevel(logging.WARNING)
+    # bleak's own debug output repeats every write; keep it quiet either way.
+    logging.getLogger("bleak").setLevel(logging.WARNING)
     try:
         asyncio.run(scan_only() if args.scan else main_async(args))
     except KeyboardInterrupt:
