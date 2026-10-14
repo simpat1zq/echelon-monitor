@@ -23,6 +23,7 @@ import logging
 import math
 import os
 import random
+import signal
 import time
 
 from aiohttp import web
@@ -224,10 +225,14 @@ class StrideBLE:
     async def run_forever(self):
         from bleak import BleakClient
 
+        # A previous run that died without disconnecting leaves BlueZ holding the
+        # link, and the treadmill stops advertising until it's power-cycled.
+        await self.release_stale_connection()
         while True:
             try:
                 device = await self.find_device()
                 if device is None:
+                    await self.release_stale_connection()
                     log.warning("Treadmill not found. Is it powered on, and is the "
                                 "tablet/app disconnected? Retrying in 5s.")
                     await asyncio.sleep(5)
@@ -272,6 +277,49 @@ class StrideBLE:
             self.workout.connected = False
             self.workout.speed = 0.0
             await asyncio.sleep(3)
+
+    def _matches(self, address, name):
+        if self.address:
+            return address.upper() == self.address.upper()
+        return self.name_prefix in (name or "").upper()
+
+    async def release_stale_connection(self):
+        """Disconnect the treadmill if BlueZ still holds a connection to it."""
+        try:
+            from dbus_fast import BusType, Message, MessageType
+            from dbus_fast.aio import MessageBus
+        except ImportError:
+            return
+        bus = None
+        try:
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            reply = await bus.call(Message(destination="org.bluez", path="/",
+                                           interface="org.freedesktop.DBus.ObjectManager",
+                                           member="GetManagedObjects"))
+            if reply.message_type == MessageType.ERROR:
+                log.debug("GetManagedObjects failed: %s", reply.body)
+                return
+            for path, ifaces in reply.body[0].items():
+                dev = ifaces.get("org.bluez.Device1")
+                if not dev or not dev.get("Connected") or not dev["Connected"].value:
+                    continue
+                address = dev["Address"].value
+                name = dev["Name"].value if "Name" in dev else ""
+                if not self._matches(address, name):
+                    continue
+                log.warning("BlueZ still has a connection to %s (%s) from an earlier run; "
+                            "disconnecting it so the treadmill advertises again.", name, address)
+                res = await bus.call(Message(destination="org.bluez", path=path,
+                                             interface="org.bluez.Device1", member="Disconnect"))
+                if res.message_type == MessageType.ERROR:
+                    log.warning("Disconnect failed: %s", res.body)
+                else:
+                    await asyncio.sleep(2)  # give the treadmill a moment to start advertising
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Stale-connection check skipped: %s", exc)
+        finally:
+            if bus is not None:
+                bus.disconnect()
 
     async def setup_notifications(self, client):
         self.log_gatt(client)
@@ -471,7 +519,24 @@ async def main_async(args):
         tasks.append(asyncio.create_task(ble.run_forever()))
     if args.csv:
         tasks.append(asyncio.create_task(csv_logger(workout, args.csv)))
-    await asyncio.gather(*tasks)
+
+    # docker stop sends SIGTERM, which a Python PID 1 otherwise ignores until
+    # it's SIGKILLed. Cancel the tasks instead so BleakClient disconnects
+    # cleanly and the treadmill is free for the next run.
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, lambda s=sig: (log.info("Got %s, disconnecting...", s.name),
+                                                        [t.cancel() for t in tasks]))
+        except (NotImplementedError, RuntimeError):
+            pass
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await runner.cleanup()
+        log.info("Stopped.")
 
 
 def main():
