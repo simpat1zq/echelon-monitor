@@ -132,9 +132,9 @@ class StrideBLE:
         if self.address:
             log.info("Looking for %s ...", self.address)
             return await BleakScanner.find_device_by_address(self.address, timeout=20)
-        log.info("Scanning for a treadmill whose name starts with %r ...", self.name_prefix)
+        log.info("Scanning for a treadmill whose name contains %r ...", self.name_prefix)
         return await BleakScanner.find_device_by_filter(
-            lambda d, adv: (d.name or adv.local_name or "").upper().startswith(self.name_prefix)
+            lambda d, adv: self.name_prefix in (d.name or adv.local_name or "").upper()
             or SERVICE_UUID in [u.lower() for u in adv.service_uuids],
             timeout=20,
         )
@@ -206,6 +206,10 @@ class StrideBLE:
                         except asyncio.TimeoutError:
                             pass
                 log.warning("Treadmill disconnected.")
+            except FileNotFoundError:
+                log.error("Can't reach the Bluetooth service (BlueZ) over D-Bus. On the host, run "
+                          "check_host.sh; in Docker, mount /run/dbus/system_bus_socket.")
+                await asyncio.sleep(10)
             except Exception as exc:  # noqa: BLE001
                 log.warning("BLE error: %s", exc)
             self.workout.connected = False
@@ -331,7 +335,7 @@ async def main_async(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--address", help="treadmill BLE MAC address (or macOS UUID); default: scan")
-    p.add_argument("--name", default="STRIDE", help="BLE name prefix to scan for (default: STRIDE)")
+    p.add_argument("--name", default="STRIDE", help="text the BLE name must contain (default: STRIDE)")
     p.add_argument("--host", default="0.0.0.0", help="web server bind address")
     p.add_argument("--port", type=int, default=8080, help="web server port (default 8080)")
     p.add_argument("--metric", action="store_true", help="treadmill reports km/h instead of mph")

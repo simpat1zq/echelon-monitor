@@ -1,0 +1,16 @@
+services:
+  stride-monitor:
+    build: .
+    container_name: stride-monitor
+    restart: unless-stopped
+    # Bluetooth is handled by the host's BlueZ service; the container talks to
+    # it through the host's system D-Bus socket. Host networking keeps the
+    # dashboard on port 8080 of the PC.
+    network_mode: host
+    volumes:
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+      - ./data:/data
+    security_opt:
+      - apparmor:unconfined
+    # Add "--address", "AA:BB:CC:DD:EE:FF" (from check_host.sh) to skip scanning.
+    command: ["--port", "8080", "--csv", "/data/workouts.csv"]

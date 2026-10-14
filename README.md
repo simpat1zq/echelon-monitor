@@ -26,7 +26,7 @@ pip install -r requirements.txt
 # Optional: check that the treadmill shows up
 python3 stride_monitor.py --scan
 
-# Start the dashboard. It scans for a device whose name starts with "STRIDE"
+# Start the dashboard. It scans for a device whose name contains "STRIDE"
 python3 stride_monitor.py
 ```
 
@@ -37,7 +37,7 @@ Useful options:
 | Flag | What it does |
 | --- | --- |
 | `--address AA:BB:..` | Connect to this device instead of scanning (on macOS, use the UUID that `--scan` prints) |
-| `--name PREFIX` | Scan for a different name prefix if yours isn't `STRIDE…` |
+| `--name TEXT` | Scan for a device whose name contains TEXT, if yours doesn't contain `STRIDE` |
 | `--metric` | Use this if the console is set to km/h |
 | `--csv workout.csv` | Write one sample per second to a CSV file |
 | `--demo` | Show fake data so you can try the page without the treadmill |
@@ -45,6 +45,47 @@ Useful options:
 
 On Linux you may need to run it with `sudo` the first time, or add your user to
 the `bluetooth` group.
+
+## Run it in Docker (Linux)
+
+Bluetooth stays on the host. The container talks to the host's BlueZ service
+through the system D-Bus socket, so the container doesn't need its own
+Bluetooth stack or `--privileged`.
+
+1. **Check the host first** (not in Docker). Turn the treadmill on and the
+   tablet's Bluetooth off, then run:
+
+   ```bash
+   bash check_host.sh
+   ```
+
+   It checks the Bluetooth adapter, the BlueZ service and the D-Bus socket. Then it
+   scans for 20 seconds and prints the treadmill's address and signal strength. If
+   it says a check failed, fix that check before going further.
+
+2. **Optional:** put the address it printed into `docker-compose.yml`:
+
+   ```yaml
+   command: ["--port", "8080", "--csv", "/data/workouts.csv", "--address", "AA:BB:CC:DD:EE:FF"]
+   ```
+
+3. **Start it:**
+
+   ```bash
+   docker compose up -d --build
+   docker compose logs -f        # wait for "Connected. Streaming data."
+   ```
+
+4. Open `http://<pc-ip>:8080/` on your phone. Workouts are saved to
+   `./data/workouts.csv`.
+
+To test the page without the treadmill:
+`docker compose run --rm stride-monitor --demo`.
+
+**Range:** Bluetooth LE normally reaches about 30 ft (10 m), but walls and the
+treadmill's metal frame cut that down. If `check_host.sh` reports a weak signal,
+or the logs show repeated disconnects, use a cheap USB Bluetooth 5.0 dongle on a
+USB extension cable placed closer to the treadmill.
 
 ## What's measured
 
@@ -60,6 +101,9 @@ are calculated. They can drift slightly from what the console shows.
 
 ## Troubleshooting
 
+- **"Can't reach the Bluetooth service" (in Docker)**: the host's
+  `bluetooth` service isn't running, or the D-Bus socket isn't mounted. Run
+  `check_host.sh` on the host.
 - **"Treadmill not found"**: make sure the belt is powered on and the tablet isn't
   connected. Run `--scan` and look for a device marked `<-- Echelon service`, then
   pass it with `--address`.
