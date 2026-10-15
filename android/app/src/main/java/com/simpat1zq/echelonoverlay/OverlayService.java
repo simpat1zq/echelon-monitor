@@ -8,6 +8,8 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.Configuration;
+import android.graphics.Point;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
@@ -110,12 +112,19 @@ public class OverlayService extends Service {
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN  // x/y measured from the screen corner
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         lp.gravity = Gravity.TOP | Gravity.START;
         lp.x = prefs().getInt("x", dp(16));
         lp.y = prefs().getInt("y", dp(16));
         wm.addView(box, lp);
+        // Once the box has a size: restore its relative position (or convert the
+        // old pixel position into one).
+        box.post(() -> {
+            if (prefs().contains("fx")) place();
+            else savePosition();
+        });
         applyScale();
         render();
 
@@ -142,6 +151,47 @@ public class OverlayService extends Service {
             }
         }
         super.onDestroy();
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // Rotation: keep the box in the same relative spot (bottom-right stays bottom-right).
+        if (box != null) box.postDelayed(this::place, 200);
+    }
+
+    // --- position ---------------------------------------------------------
+    // Stored as fractions of the free space (0 = left/top edge, 1 = right/bottom edge)
+    // so it survives rotation and size changes.
+
+    private Point freeSpace() {
+        Point screen = new Point();
+        wm.getDefaultDisplay().getRealSize(screen);
+        return new Point(Math.max(0, screen.x - box.getWidth()), Math.max(0, screen.y - box.getHeight()));
+    }
+
+    private void place() {
+        Point free = freeSpace();
+        lp.x = Math.round(prefs().getFloat("fx", 0f) * free.x);
+        lp.y = Math.round(prefs().getFloat("fy", 0f) * free.y);
+        wm.updateViewLayout(box, lp);
+    }
+
+    private void clampToScreen() {
+        Point free = freeSpace();
+        lp.x = Math.max(0, Math.min(free.x, lp.x));
+        lp.y = Math.max(0, Math.min(free.y, lp.y));
+    }
+
+    private void savePosition() {
+        clampToScreen();
+        wm.updateViewLayout(box, lp);
+        Point free = freeSpace();
+        prefs().edit()
+                .putFloat("fx", free.x == 0 ? 0f : (float) lp.x / free.x)
+                .putFloat("fy", free.y == 0 ? 0f : (float) lp.y / free.y)
+                .putFloat("scale", scale)
+                .apply();
     }
 
     @Override
@@ -288,6 +338,7 @@ public class OverlayService extends Service {
                         if (resizing || pinch.isInProgress() || e.getPointerCount() > 1) return true;
                         lp.x = startX + Math.round(e.getRawX() - down.getRawX());
                         lp.y = startY + Math.round(e.getRawY() - down.getRawY());
+                        clampToScreen();
                         wm.updateViewLayout(box, lp);
                         return true;
                     }
@@ -330,7 +381,8 @@ public class OverlayService extends Service {
             }
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 resizing = false;
-                prefs().edit().putInt("x", lp.x).putInt("y", lp.y).putFloat("scale", scale).apply();
+                // After the new size has been laid out, keep it on screen and remember.
+                box.post(OverlayService.this::savePosition);
             }
             return true;
         }
