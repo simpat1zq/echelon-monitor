@@ -542,7 +542,7 @@ class StrideBLE:
         data = bytes(data)
         if len(data) >= 2 and data[1] == 0xA0:
             return
-        if direction == "RX" and len(data) >= 2 and data[1] == 0xD1 and data == self.last_d1:
+        if len(data) >= 2 and data[1] == 0xD1 and data == self.last_d1:  # repeats and their acks
             return
         self.packet_log.append({"t": time.time(), "dir": direction, "hex": data.hex(" ")})
 
