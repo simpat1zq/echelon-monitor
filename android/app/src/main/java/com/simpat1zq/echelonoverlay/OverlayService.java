@@ -45,7 +45,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Floating, draggable box showing live treadmill stats from the server's /api/state.
- * Tap to change which stat is shown large; double-tap to open the app.
+ * Tap to open the app; double-tap to change which stat is shown large.
  * Hidden while the app itself is on screen; brings the app up when a run starts.
  */
 public class OverlayService extends Service {
@@ -345,7 +345,7 @@ public class OverlayService extends Service {
     }
 
     /**
-     * Drag to move, tap to cycle the big stat, double-tap to open the app,
+     * Drag to move, tap to open the app, double-tap to cycle the big stat,
      * long-press then drag (or pinch) to resize.
      */
     private class Touch implements View.OnTouchListener {
@@ -392,15 +392,15 @@ public class OverlayService extends Service {
 
                     @Override
                     public boolean onSingleTapConfirmed(MotionEvent e) {
-                        primary = (primary + 1) % 3;
-                        prefs().edit().putInt("primary", primary).apply();
-                        render();
+                        openApp();
                         return true;
                     }
 
                     @Override
                     public boolean onDoubleTap(MotionEvent e) {
-                        openApp();
+                        primary = (primary + 1) % 3;
+                        prefs().edit().putInt("primary", primary).apply();
+                        render();
                         return true;
                     }
                 });
