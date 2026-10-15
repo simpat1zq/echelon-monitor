@@ -56,7 +56,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        // The page keeps the screen on during runs (setKeepScreenOn below).
 
         web = new WebView(this);
         web.setBackgroundColor(0xFF0F1115);
@@ -70,9 +70,6 @@ public class MainActivity extends Activity {
         setContentView(web);
         web.loadUrl(serverUrl());
 
-        // Motion seen by the camera also counts as activity for the page's screen timeout.
-        MotionService.onMotion = () -> web.evaluateJavascript(
-                "window.TreadmillMenu && window.TreadmillMenu.poke && window.TreadmillMenu.poke()", null);
         if (prefs().getBoolean("motion", false) && !MotionService.running && hasCamera()) {
             startForegroundService(new Intent(this, MotionService.class));
         }
@@ -145,7 +142,6 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        MotionService.onMotion = null;
         web.destroy();
         super.onDestroy();
     }

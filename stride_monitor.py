@@ -881,7 +881,7 @@ def make_app(workout, ble=None):
         return {"name": name[:60], "weight_kg": num("weight_kg"), "height_cm": num("height_cm"),
                 "age": num("age", int), "sex": sex}
 
-    defaults = {"screen_timeout_min": 15}
+    defaults = {"screen_timeout_min": 5}
 
     def current_settings():
         out = dict(defaults)
@@ -984,7 +984,8 @@ def make_app(workout, ble=None):
         return web.json_response({"ok": True})
 
     async def state(_request):
-        return web.json_response(workout.snapshot())
+        # The Android overlay reads the screen timeout from here too.
+        return web.json_response(dict(workout.snapshot(), **current_settings()))
 
     async def end_run(_request):
         workout.end_run()

@@ -114,7 +114,11 @@ The light in the header is green while the treadmill is connected.
   builds it and publishes `echelon-overlay.apk` to the `android` release. The
   Docker image includes the latest APK, so the menu can offer it at
   `/echelon-overlay.apk`. The app opens itself when a run starts, and the
-  overlay hides while the app is on screen. It also restarts the tablet's Wi-Fi
+  overlay hides while the app is on screen. The screen stays on while the belt
+  moves and for 5 minutes after (menu: "Screen on after runs"); then the
+  tablet's own timeout applies. Wake on motion only uses the camera while the
+  screen is off. In the overlay, calories take turns with time every 10 seconds,
+  and a changed incline shows for 15 seconds. It also restarts the tablet's Wi-Fi
   after 5 minutes without a connection, at most once every 30 minutes (Android 9
   and older; newer Android doesn't let apps switch Wi-Fi).
 

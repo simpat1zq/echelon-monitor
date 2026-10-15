@@ -6,6 +6,9 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
@@ -21,7 +24,6 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
-import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 
@@ -34,33 +36,41 @@ import java.util.Date;
  * Watches the front camera at low resolution and wakes the screen when something
  * moves. Frames are compared in memory only; nothing is stored or sent.
  *
- * To save battery the camera doesn't stream: every CHECK_EVERY_MS it runs for a
- * few frames (so exposure can settle), keeps the last one and stops again.
+ * It only watches while the screen is off: with the screen on (during a run, or
+ * while you use another app) the camera is closed and its memory freed. To save
+ * battery it doesn't stream either: every CHECK_EVERY_MS it runs for a few frames
+ * (so exposure can settle), keeps the last one and stops again.
  */
 public class MotionService extends Service {
 
     static volatile boolean running = false;
-    /** Set by MainActivity so motion can also reset the page's screen timeout. */
-    static volatile Runnable onMotion;
 
     private static final String TAG = "MotionService";
     private static final String CHANNEL = "motion";
     private static final String ACTION_STOP = "stop";
     private static final long CHECK_EVERY_MS = 4000;
     private static final int WARMUP_FRAMES = 3;           // frames dropped while exposure settles
+    private static final int FIRST_WARMUP_FRAMES = 10;    // more right after the camera opens
     private static final int GRID_W = 32, GRID_H = 24;
     private static final int CELL_DIFF = 14;           // brightness change (0-255) that counts
     private static final float CHANGED_FRACTION = 0.03f; // share of cells that must change
 
     private HandlerThread thread;
     private Handler bg;
-    private final Handler main = new Handler(Looper.getMainLooper());
     private CameraDevice camera;
     private CameraCaptureSession session;
     private ImageReader reader;
     private CaptureRequest request;
-    private int burstFrames;
+    private int burstFrames, warmup;
     private final Runnable burst = this::startBurst;
+    private final Runnable reopen = this::openCamera;
+
+    private final BroadcastReceiver screen = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            watch(Intent.ACTION_SCREEN_OFF.equals(intent.getAction()));
+        }
+    };
     private PowerManager.WakeLock cpuLock;
     private int[] previous;
     private long lastWake, lastNote;
@@ -74,14 +84,15 @@ public class MotionService extends Service {
         } else {
             startForeground(2, buildNotification(null));
         }
-        // Keep the CPU (and so the camera) running while the screen is off.
         PowerManager pm = getSystemService(PowerManager.class);
         cpuLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "echelon:motion-watch");
-        cpuLock.acquire();
         thread = new HandlerThread("motion");
         thread.start();
         bg = new Handler(thread.getLooper());
-        bg.post(this::openCamera);
+        IntentFilter f = new IntentFilter(Intent.ACTION_SCREEN_OFF);
+        f.addAction(Intent.ACTION_SCREEN_ON);
+        registerReceiver(screen, f);
+        watch(!pm.isInteractive());
         WifiWatchdog.start(this);
     }
 
@@ -98,6 +109,8 @@ public class MotionService extends Service {
     public void onDestroy() {
         running = false;
         WifiWatchdog.stop();
+        unregisterReceiver(screen);
+        bg.removeCallbacks(reopen);
         bg.post(this::closeCamera);
         thread.quitSafely();
         if (cpuLock.isHeld()) cpuLock.release();
@@ -111,7 +124,21 @@ public class MotionService extends Service {
 
     // --- camera -----------------------------------------------------------
 
+    /** Screen off: start watching. Screen on: close the camera and let the CPU sleep. */
+    private void watch(boolean on) {
+        if (on) {
+            // Keep the CPU (and so the camera) running while the screen is off.
+            if (!cpuLock.isHeld()) cpuLock.acquire();
+            bg.post(this::openCamera);
+        } else {
+            bg.removeCallbacks(reopen);
+            bg.post(this::closeCamera);
+            if (cpuLock.isHeld()) cpuLock.release();
+        }
+    }
+
     private void openCamera() {
+        if (camera != null || getSystemService(PowerManager.class).isInteractive()) return;
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             Log.w(TAG, "No camera permission");
             stopSelf();
@@ -138,7 +165,14 @@ public class MotionService extends Service {
             cm.openCamera(cameraId, new CameraDevice.StateCallback() {
                 @Override
                 public void onOpened(CameraDevice cam) {
+                    if (getSystemService(PowerManager.class).isInteractive()) {
+                        cam.close();  // the screen came on while it was opening
+                        if (reader != null) reader.close();
+                        reader = null;
+                        return;
+                    }
                     camera = cam;
+                    warmup = FIRST_WARMUP_FRAMES;
                     startCapture();
                 }
 
@@ -207,12 +241,13 @@ public class MotionService extends Service {
 
     private void retryLater() {
         closeCamera();
-        if (running) bg.postDelayed(this::openCamera, 30000);
+        if (running) bg.postDelayed(reopen, 30000);
     }
 
     private void closeCamera() {
         bg.removeCallbacks(burst);
         request = null;
+        previous = null;  // the next frame starts a fresh comparison
         try {
             if (session != null) session.close();
         } catch (Exception ignored) {
@@ -231,7 +266,8 @@ public class MotionService extends Service {
         if (img == null) return;
         try {
             // Frames still in flight after the burst stopped are ignored.
-            if (++burstFrames != WARMUP_FRAMES + 1) return;
+            if (++burstFrames != warmup + 1) return;
+            warmup = WARMUP_FRAMES;
             try {
                 session.stopRepeating();
             } catch (Exception e) {
@@ -299,8 +335,6 @@ public class MotionService extends Service {
             String when = DateFormat.getTimeInstance(DateFormat.MEDIUM).format(new Date(now));
             getSystemService(NotificationManager.class).notify(2, buildNotification("Motion seen at " + when));
         }
-        Runnable listener = onMotion;
-        if (listener != null) main.post(listener);
     }
 
     // --- plumbing ---------------------------------------------------------
@@ -318,7 +352,7 @@ public class MotionService extends Service {
         return new Notification.Builder(this, CHANNEL)
                 .setContentTitle("Wake on motion is on")
                 .setContentText(status != null ? status
-                        : "The front camera watches for movement to turn the screen on")
+                        : "While the screen is off, the front camera watches for movement to turn it on")
                 .setSmallIcon(android.R.drawable.ic_menu_camera)
                 .setContentIntent(open)
                 .addAction(new Notification.Action.Builder(null, "Turn off", stop).build())

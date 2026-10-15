@@ -47,6 +47,10 @@ import java.util.concurrent.TimeUnit;
  * Floating, draggable box showing live treadmill stats from the server's /api/state.
  * Tap to open the app; double-tap to change which stat is shown large.
  * Hidden while the app itself is on screen; brings the app up when a run starts.
+ * Calories take turns with time (or with distance when time is the big stat)
+ * every 10 s, and a changed incline replaces the last small stat for 15 s.
+ * Keeps the screen on while the belt moves and for the server's
+ * screen_timeout_min after it stops.
  */
 public class OverlayService extends Service {
 
@@ -57,14 +61,15 @@ public class OverlayService extends Service {
 
     private static final String CHANNEL = "overlay";
     private static final String ACTION_STOP = "stop";
-    private static final int BLUE = 0xFF4FC3F7;
     private static final int WHITE = 0xFFF2F4F8;
     private static final int MUTED = 0xFFB8C0CC;
-    private static final int RED = 0xFFFF6B6B;
     private static final int OUTLINE = 0xFF000000;
 
-    // The stats, in the order a tap cycles through them. Time is the default primary.
-    private static final int TIME = 0, SPEED = 1, DISTANCE = 2;
+    // The stats; the first three are the order a double-tap cycles through for the
+    // big slot. Time is the default. Colours match the web page (no red).
+    private static final int TIME = 0, SPEED = 1, DISTANCE = 2, CALORIES = 3, INCLINE = 4;
+    private static final int[] COLOR = {0xFF81C784, 0xFF4FC3F7, 0xFFFFD54F, 0xFFCE93D8, 0xFFFFB74D};
+    private static final long CYCLE_MS = 10_000, INCLINE_SHOWN_MS = 15_000;
 
     private WindowManager wm;
     private WindowManager.LayoutParams lp;
@@ -99,6 +104,11 @@ public class OverlayService extends Service {
     // Latest values from the server.
     private String timeText = "0:00", speedText = "0.0", speedUnit = "mph";
     private String distText = "0.00", distUnit = "mi";
+    private String calText = null;  // null until the server has a calorie count
+    private int incline;
+    private Integer lastIncline;  // null until the first reply from the server
+    private long inclineUntil, lastMoving;
+    private boolean keepOn;
     private boolean connected = false;
     private Boolean runActive;  // null until the first reply from the server
 
@@ -263,7 +273,7 @@ public class OverlayService extends Service {
         box.addView(bottom);
 
         noteTv = text(12, 2, 0, 0, 0, 0);
-        noteTv.setTextColor(RED);
+        noteTv.setTextColor(WHITE);
         noteTv.setVisibility(View.GONE);
         box.addView(noteTv);
 
@@ -319,11 +329,17 @@ public class OverlayService extends Service {
     /** Puts the chosen stat in the big slot and the other two underneath. */
     private void render() {
         int[] order = {primary, (primary + 1) % 3, (primary + 2) % 3};
-        setStat(primaryValue, primaryUnit, order[0], true);
-        for (int i = 0; i < 2; i++) setStat(secondaryValue[i], secondaryUnit[i], order[i + 1], false);
+        long now = System.currentTimeMillis();
+        if (calText != null && (now / CYCLE_MS) % 2 == 1) {
+            int swap = primary == TIME ? DISTANCE : TIME;
+            for (int i = 0; i < 3; i++) if (order[i] == swap) order[i] = CALORIES;
+        }
+        if (now < inclineUntil) order[2] = INCLINE;
+        setStat(primaryValue, primaryUnit, order[0]);
+        for (int i = 0; i < 2; i++) setStat(secondaryValue[i], secondaryUnit[i], order[i + 1]);
     }
 
-    private void setStat(TextView value, TextView unit, int which, boolean big) {
+    private void setStat(TextView value, TextView unit, int which) {
         switch (which) {
             case TIME:
                 value.setText(timeText);
@@ -333,13 +349,20 @@ public class OverlayService extends Service {
                 value.setText(speedText);
                 unit.setText(speedUnit);
                 break;
+            case CALORIES:
+                value.setText(calText);
+                unit.setText("kcal");
+                break;
+            case INCLINE:
+                value.setText(String.valueOf(incline));
+                unit.setText("% incline");
+                break;
             default:
                 value.setText(distText);
                 unit.setText(distUnit);
                 break;
         }
-        // Whichever stat is big is shown in blue while the treadmill is connected.
-        value.setTextColor(big && connected ? BLUE : WHITE);
+        value.setTextColor(connected ? COLOR[which] : WHITE);
         unit.setTextColor(MUTED);
         unit.setVisibility(unit.getText().length() == 0 ? View.GONE : View.VISIBLE);
     }
@@ -498,8 +521,24 @@ public class OverlayService extends Service {
         timeText = formatTime(d.optInt("moving_seconds", 0));
         distText = String.format(Locale.US, "%.2f", d.optDouble("distance", 0));
         distUnit = d.optString("distance_unit", "mi");
+        calText = d.isNull("calories") ? null : String.valueOf(d.optInt("calories"));
+        incline = (int) Math.round(d.optDouble("incline", 0));
+        if (lastIncline != null && incline != lastIncline) inclineUntil = System.currentTimeMillis() + INCLINE_SHOWN_MS;
+        lastIncline = incline;
+        if (d.optDouble("speed", 0) > 0) lastMoving = System.currentTimeMillis();
+        long timeoutMs = d.optInt("screen_timeout_min", 5) * 60_000L;
+        setKeepOn(lastMoving > 0 && System.currentTimeMillis() - lastMoving < timeoutMs);
         render();
         showNote(connected ? null : "treadmill not connected");
+    }
+
+    /** Keeps the screen on while the box is showing (the app does the same when it's up). */
+    private void setKeepOn(boolean on) {
+        if (on == keepOn) return;
+        keepOn = on;
+        if (on) lp.flags |= WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        else lp.flags &= ~WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        wm.updateViewLayout(box, lp);
     }
 
     private void showNote(String msg) {

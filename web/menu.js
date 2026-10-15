@@ -97,7 +97,7 @@
   refreshApp();
   const timeoutItem = el("button", "item");
   timeoutItem.onclick = async () => {
-    const v = prompt("Let the screen turn off after how many minutes with the treadmill stopped?",
+    const v = prompt("Keep the screen on for how many minutes after the belt stops?",
       String(screenTimeoutMin));
     if (v == null) return;
     const r = await fetch("/api/settings", {
@@ -150,13 +150,13 @@
   }
 
   // --- Keep the screen on while the treadmill is in use ---------------
-  // Awake while the belt moves and for `screen_timeout_min` after it stops
-  // (or after the page opens); then the device's own screen timeout applies.
-  let screenTimeoutMin = 15, lastActive = Date.now(), wakeLock = null, awake = null;
+  // Awake while the belt moves and for `screen_timeout_min` after it stops;
+  // otherwise the device's own screen timeout applies.
+  let screenTimeoutMin = 5, lastActive = 0, wakeLock = null, awake = null;
 
   function applySettings(s) {
-    screenTimeoutMin = s.screen_timeout_min || 15;
-    timeoutItem.textContent = "Screen timeout: " + screenTimeoutMin + " min";
+    screenTimeoutMin = s.screen_timeout_min || 5;
+    timeoutItem.textContent = "Screen on after runs: " + screenTimeoutMin + " min";
   }
   applySettings({});
 
@@ -196,7 +196,5 @@
     fetch("/echelon-overlay.apk", { method: "HEAD" }).then((r) => { apk.hidden = !r.ok; }).catch(() => {});
   }
   load();
-  // Called by the app when the camera sees movement: counts as activity.
-  const poke = () => { lastActive = Date.now(); updateAwake(); };
-  window.TreadmillMenu = { open, close, reload: load, refreshApp, poke };
+  window.TreadmillMenu = { open, close, reload: load, refreshApp };
 })();

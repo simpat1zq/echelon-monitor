@@ -13,7 +13,9 @@
 <style>
   :root {
     --bg: #0f1115; --card: #1a1d24; --text: #f2f4f8; --muted: #8b93a3;
-    --accent: #4fc3f7; --ok: #66bb6a; --bad: #ef5350; --hr: #ff7070;
+    --accent: #4fc3f7; --ok: #66bb6a; --bad: #ef5350;
+    /* One colour per stat, shared with the Android overlay. No red: it's hard to focus on. */
+    --speed: #4fc3f7; --time: #81c784; --dist: #ffd54f; --cal: #ce93d8; --incline: #ffb74d; --hr: #80cbc4;
   }
   * { box-sizing: border-box; }
   body {
@@ -26,9 +28,13 @@
   .card.big { grid-column: 1 / -1; }
   .label { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
   .value { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; }
-  .big .value { font-size: 72px; color: var(--accent); }
+  .big .value { font-size: 72px; color: var(--speed); }
   .unit { font-size: 16px; color: var(--muted); font-weight: 500; margin-left: 4px; }
   .hr .value { color: var(--hr); }
+  .time .value { color: var(--time); }
+  .dist .value { color: var(--dist); }
+  .cal .value { color: var(--cal); }
+  .incline .value { color: var(--incline); }
   .stats { margin-top: 12px; }
   /* Landscape tablet: chart beside the speed, stats in two even rows, so it all
      fits on one screen. */
@@ -70,12 +76,12 @@
   </div>
 </div>
 <div class="grid stats" id="stats">
-  <div class="card"><div class="label">Time</div><div class="value" id="time">0:00</div></div>
-  <div class="card"><div class="label">Distance</div><div class="value"><span id="distance">0.00</span><span class="unit" id="distUnit">mi</span></div></div>
+  <div class="card time"><div class="label">Time</div><div class="value" id="time">0:00</div></div>
+  <div class="card dist"><div class="label">Distance</div><div class="value"><span id="distance">0.00</span><span class="unit" id="distUnit">mi</span></div></div>
   <div class="card"><div class="label">Pace</div><div class="value"><span id="pace">--</span><span class="unit" id="paceUnit">/mi</span></div></div>
-  <div class="card"><div class="label">Incline</div><div class="value"><span id="incline">0</span><span class="unit">%</span></div></div>
+  <div class="card incline"><div class="label">Incline</div><div class="value"><span id="incline">0</span><span class="unit">%</span></div></div>
   <div class="card hr" id="hrCard" hidden><div class="label">Heart rate</div><div class="value"><span id="hr">--</span><span class="unit">bpm</span></div></div>
-  <div class="card" id="calCard" hidden><div class="label">Calories</div><div class="value"><span id="cal">0</span><span class="unit">kcal</span></div></div>
+  <div class="card cal" id="calCard" hidden><div class="label">Calories</div><div class="value"><span id="cal">0</span><span class="unit">kcal</span></div></div>
   <div class="card"><div class="label">Climb</div><div class="value"><span id="elev">0</span><span class="unit">ft</span></div></div>
 </div>
 
