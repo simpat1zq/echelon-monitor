@@ -19,13 +19,11 @@ services:
       - /etc/localtime:/etc/localtime:ro
     security_opt:
       - apparmor:unconfined
-    # --debug logs every BLE packet; drop it once the treadmill data looks right.
-    # Add "--protocol", "stride4" if it connects but the speed never updates.
+    # Add --debug to log every BLE packet when troubleshooting.
     command:
       - --port=8080
       - --db=/data/echelon.db
       - --address=E6:4B:2D:DE:6E:51
-      - --debug
     networks:
       - arrstack
     restart: always
