@@ -29,6 +29,15 @@
   .big .value { font-size: 72px; color: var(--accent); }
   .unit { font-size: 16px; color: var(--muted); font-weight: 500; margin-left: 4px; }
   .hr .value { color: var(--hr); }
+  .stats { margin-top: 12px; }
+  /* Landscape tablet: chart beside the speed, stats in two even rows, so it all
+     fits on one screen. */
+  @media (orientation: landscape) and (min-width: 700px) {
+    .speedrow { display: flex; align-items: center; gap: 24px; }
+    .speedrow .value { flex: none; }
+    .speedrow canvas { flex: 1; min-width: 0; height: 120px; margin-top: 0; }
+    .stats { grid-template-columns: repeat(var(--cols, 3), 1fr); }
+  }
   canvas { width: 100%; height: 140px; display: block; margin-top: 8px; }
   .version { margin-top: 12px; font-size: 12px; color: var(--muted); text-align: center; }
   .version a { color: inherit; }
@@ -53,12 +62,14 @@
 
 <div class="runbar" id="runbar"></div>
 
-<div class="grid">
-  <div class="card big">
-    <div class="label">Speed</div>
+<div class="card big">
+  <div class="label">Speed</div>
+  <div class="speedrow">
     <div class="value"><span id="speed">0.0</span><span class="unit" id="speedUnit">mph</span></div>
     <canvas id="chart"></canvas>
   </div>
+</div>
+<div class="grid stats" id="stats">
   <div class="card"><div class="label">Time</div><div class="value" id="time">0:00</div></div>
   <div class="card"><div class="label">Distance</div><div class="value"><span id="distance">0.00</span><span class="unit" id="distUnit">mi</span></div></div>
   <div class="card"><div class="label">Pace</div><div class="value"><span id="pace">--</span><span class="unit" id="paceUnit">/mi</span></div></div>
@@ -130,6 +141,8 @@ function render(d) {
   $("incline").textContent = d.incline;
   $("hrCard").hidden = !d.hr_seen;
   $("calCard").hidden = d.calories == null;
+  const shown = [...$("stats").children].filter((c) => !c.hidden).length;
+  $("stats").style.setProperty("--cols", Math.ceil(shown / 2));
   if (d.calories != null) $("cal").textContent = d.calories;
   $("hr").textContent = d.heart_rate || "--";
   $("endRun").hidden = !d.run_active;
