@@ -75,6 +75,50 @@ DEBUG_COMMANDS = [
      "note": "Read-only query (returns a text string, likely a serial number).", "danger": False},
 ]
 
+
+
+def packet(cmd, *payload):
+    """An Echelon command: F0, command, payload length, payload, checksum."""
+    pkt = [0xF0, cmd, len(payload), *payload]
+    pkt.append(checksum(pkt))
+    return bytes(pkt)
+
+
+def speed_test_commands(workout):
+    """Debug-page variants of the speed/incline commands, built from the current values."""
+    unit = "km/h" if workout.metric else "mph"
+    lo, hi = SPEED_LIMITS[unit]
+    up = round(min(hi, max(lo, workout.speed + 0.5)), 1)
+    incline = min(INCLINE_MAX, workout.incline + 1)
+
+    def speed(value):
+        raw = round(value * 1000)
+        return packet(0xB2, raw >> 8, raw & 0xFF)
+
+    other = up / 1.609344 if workout.metric else up * 1.609344
+    qz_start = [packet(0xB0, 0x01), packet(0xA5), packet(0xD0, 0x00), packet(0xD0, 0x11)]
+    return [
+        {"id": "spd", "label": f"Speed {up} {unit}", "packets": [speed(up)], "response": True,
+         "note": "What the + button sends (B2, write with response). Belt must be moving.", "danger": True},
+        {"id": "spd_nr", "label": f"Speed {up} {unit}, no response", "packets": [speed(up)], "response": False,
+         "note": "Same, written without response like QZ does.", "danger": True},
+        {"id": "spd_other", "label": f"Speed {up} sent as {'mph' if workout.metric else 'km/h'}",
+         "packets": [speed(other)], "response": False,
+         "note": "In case the treadmill expects the other unit. If it reads it as "
+                 f"{unit}, the belt goes to {other:.1f}!", "danger": True},
+        {"id": "inc", "label": f"Incline {incline}%", "packets": [packet(0xB1, incline)], "response": True,
+         "note": "What the incline + button sends (B1, write with response).", "danger": True},
+        {"id": "inc_nr", "label": f"Incline {incline}%, no response", "packets": [packet(0xB1, incline)],
+         "response": False, "note": "Same, written without response like QZ does.", "danger": True},
+        {"id": "qz_start", "label": "QZ start sequence", "packets": qz_start, "response": False,
+         "note": "B0 01 (start), A5, D0 00, D0 11: what QZ sends to start a workout before it "
+                 "changes speed. May start the belt. Then try the speed buttons.", "danger": True},
+        {"id": "d0", "label": "D0 00, D0 11 only", "packets": qz_start[2:], "response": False,
+         "note": "QZ's start sequence without the start command; maybe hands control to the app.",
+         "danger": True},
+    ]
+
+
 # Model code reported in the 0xA1 reply; the Stride-4s reports 0x20.
 MODEL_STRIDE_4S = 0x20
 # Read-only queries the Echelon app sends after the basic init on this model.
@@ -530,12 +574,13 @@ class StrideBLE:
             return BLEDevice(address, name, {"path": path, "props": {}})
         return None
 
-    async def write(self, hexstr_or_bytes):
+    async def write(self, hexstr_or_bytes, response=None):
         data = bytes.fromhex(hexstr_or_bytes) if isinstance(hexstr_or_bytes, str) else bytes(hexstr_or_bytes)
         if self.debug:
             log.debug("TX %s", data.hex(" "))
         self._log_packet("TX", data)
-        await self.client.write_gatt_char(WRITE_UUID, data, response=self.write_response)
+        await self.client.write_gatt_char(WRITE_UUID, data,
+                                          response=self.write_response if response is None else response)
 
     def _log_packet(self, direction, data):
         """Keep recent traffic for the debug page, skipping the keepalive chatter."""
@@ -552,10 +597,14 @@ class StrideBLE:
         if not self.has_echelon:
             raise RuntimeError("this treadmill doesn't accept Echelon commands")
 
-    async def send_debug(self, hexstr):
+    async def send_debug(self, packets, response=None):
         self._require_connected()
-        log.info("Debug command: %s", hexstr)
-        await self.write(hexstr)
+        for i, data in enumerate(packets):
+            if i:
+                await asyncio.sleep(0.2)
+            log.info("Debug command: %s%s", bytes(data).hex(" "),
+                     "" if response is None else " (with response)" if response else " (no response)")
+            await self.write(data, response)
 
     async def set_speed(self, speed):
         """Ask the belt for a speed, in the console's unit (same scale as 0xD3 packets)."""
@@ -1034,17 +1083,24 @@ def make_app(workout, ble=None, controls=None):
             "connected": workout.connected,
             "model": None if ble is None or ble.model is None else f"0x{ble.model:02x}",
             "commands": DEBUG_COMMANDS,
+            "tests": [dict(c, packets=[p.hex(" ") for p in c["packets"]])
+                      for c in speed_test_commands(workout)],
             "packets": list(ble.packet_log) if ble else [],
         })
 
     async def debug_send(request):
-        cmd = next((c for c in DEBUG_COMMANDS if c["id"] == request.match_info["cmd"]), None)
-        if cmd is None:
+        cmd_id = request.match_info["cmd"]
+        cmd = next((c for c in DEBUG_COMMANDS if c["id"] == cmd_id), None)
+        test = next((c for c in speed_test_commands(workout) if c["id"] == cmd_id), None)
+        if cmd is None and test is None:
             raise web.HTTPNotFound()
         if ble is None:
             return web.json_response({"ok": False, "error": "no treadmill in demo mode"}, status=409)
         try:
-            await ble.send_debug(cmd["hex"])
+            if cmd:
+                await ble.send_debug([bytes.fromhex(cmd["hex"])])
+            else:
+                await ble.send_debug(test["packets"], test["response"])
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"ok": False, "error": str(exc)}, status=409)
         return web.json_response({"ok": True})
