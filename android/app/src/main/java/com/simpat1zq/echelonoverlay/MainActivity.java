@@ -68,7 +68,6 @@ public class MainActivity extends Activity {
         // Without a WebChromeClient, alert()/confirm()/prompt() silently do nothing.
         web.setWebChromeClient(new WebChromeClient());
         setContentView(web);
-        hideSystemBars();
         web.loadUrl(serverUrl());
 
         // Motion seen by the camera also counts as activity for the page's screen timeout.
@@ -116,10 +115,17 @@ public class MainActivity extends Activity {
         }
     }
 
+    // The overlay steps aside while the app itself is on screen.
     @Override
-    public void onWindowFocusChanged(boolean hasFocus) {
-        super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) hideSystemBars();
+    protected void onStart() {
+        super.onStart();
+        OverlayService.setAppVisible(true);
+    }
+
+    @Override
+    protected void onStop() {
+        OverlayService.setAppVisible(false);
+        super.onStop();
     }
 
     @Override
@@ -142,16 +148,6 @@ public class MainActivity extends Activity {
         MotionService.onMotion = null;
         web.destroy();
         super.onDestroy();
-    }
-
-    private void hideSystemBars() {
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        | View.SYSTEM_UI_FLAG_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
     }
 
     // --- overlay ----------------------------------------------------------

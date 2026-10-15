@@ -53,10 +53,6 @@
   and note which (if any) makes the blank fields show numbers. Orange ones can start or stop the belt:
   only use them with the safety key clipped on, or stand off the belt.</p>
 
-<h2>Speed &amp; incline tests</h2>
-<p class="intro">Try these with the belt moving at a slow walk, one at a time, and note which (if any)
-  changes the belt. Each one targets 0.5 faster or 1% steeper than now.</p>
-<div id="tests"></div>
 <h2>Commands</h2>
 <div id="cmds"></div>
 
@@ -67,7 +63,6 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let built = false, connected = false;
-const codes = {}, current = {};
 
 function toast(msg) {
   const t = $("toast");
@@ -76,33 +71,30 @@ function toast(msg) {
   toast.timer = setTimeout(() => (t.hidden = true), 3000);
 }
 
-const show = (c) => (c.packets || [c.hex.match(/../g).join(" ")]).join("  |  ");
-function buildCommands(box, cmds) {
+function buildCommands(cmds) {
+  const box = $("cmds");
   for (const c of cmds) {
     const row = document.createElement("div");
     row.className = "cmd" + (c.danger ? " danger" : "");
     const info = document.createElement("div");
     const name = document.createElement("div");
     name.className = "name"; name.textContent = c.label;
-    codes[c.id + ":name"] = name;
     const note = document.createElement("div");
     note.className = "note"; note.textContent = c.note + " ";
     const code = document.createElement("code");
-    code.textContent = show(c);
-    codes[c.id] = code;
+    code.textContent = c.hex.match(/../g).join(" ");
     note.append(code);
     info.append(name, note);
     const btn = document.createElement("button");
     btn.textContent = "Send";
     btn.dataset.cmd = c.id;
     btn.onclick = async () => {
-      const now = current[c.id] || c;
-      if (c.danger && !confirm(now.label + "\n\n" + now.note + "\n\nSend it?")) return;
+      if (c.danger && !confirm(c.label + "\n\n" + c.note + "\n\nSend it?")) return;
       btn.disabled = true;
       try {
         const r = await fetch("/api/debug/" + c.id, { method: "POST" });
         const d = await r.json();
-        toast(d.ok ? "Sent " + now.label : "Failed: " + d.error);
+        toast(d.ok ? "Sent " + c.label : "Failed: " + d.error);
       } catch (e) {
         toast("Failed: " + e);
       } finally {
@@ -135,13 +127,7 @@ function renderLog(packets) {
 async function refresh() {
   try {
     const d = await (await fetch("/api/debug")).json();
-    if (!built) { buildCommands($("tests"), d.tests); buildCommands($("cmds"), d.commands); built = true; }
-    // The tests are built from the current speed and incline; keep their text up to date.
-    for (const t of d.tests) {
-      current[t.id] = t;
-      codes[t.id].textContent = show(t);
-      codes[t.id + ":name"].textContent = t.label;
-    }
+    if (!built) { buildCommands(d.commands); built = true; }
     connected = d.connected;
     $("status").innerHTML = "";
     const s = $("status");
@@ -150,11 +136,7 @@ async function refresh() {
     b.textContent = d.connected ? "connected" : "not connected";
     s.append(b);
     if (d.model) s.append(" · model " + d.model);
-    s.append(document.createElement("br"));
-    s.append(d.challenge
-      ? "Unlock challenge (E0): " + d.challenge.hex + " at " + new Date(d.challenge.t * 1000).toLocaleTimeString()
-      : "No unlock challenge (E0) received since the server started.");
-    document.querySelectorAll("#cmds button, #tests button").forEach((btn) => (btn.disabled = !d.connected));
+    document.querySelectorAll("#cmds button").forEach((btn) => (btn.disabled = !d.connected));
     renderLog(d.packets);
   } catch (e) {
     $("status").textContent = "Server offline – retrying…";

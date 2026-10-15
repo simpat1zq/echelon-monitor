@@ -71,59 +71,9 @@ DEBUG_COMMANDS = [
      "danger": False},
     {"id": "c72", "hex": "f072010164", "label": "72 01",
      "note": "Sent by the app on the wired console link; purpose unknown.", "danger": False},
-    {"id": "a4", "hex": "f0a40094", "label": "A4 (asks for the unlock challenge)",
-     "note": "QZ sends this and waits for the treadmill's E0 unlock challenge. If one arrives, "
-             "it shows at the top of this page.", "danger": False},
-    {"id": "qz_unlock", "hex": "f0e0fd3e6548d58d", "label": "QZ's fixed unlock answer (E0)",
-     "note": "The answer QZ hard-codes for the challenge 72 85 18 58 61. Only helps if your "
-             "treadmill sends that same challenge.", "danger": False},
     {"id": "c73", "hex": "f0730063", "label": "Query 73",
      "note": "Read-only query (returns a text string, likely a serial number).", "danger": False},
 ]
-
-
-
-def packet(cmd, *payload):
-    """An Echelon command: F0, command, payload length, payload, checksum."""
-    pkt = [0xF0, cmd, len(payload), *payload]
-    pkt.append(checksum(pkt))
-    return bytes(pkt)
-
-
-def speed_test_commands(workout):
-    """Debug-page variants of the speed/incline commands, built from the current values."""
-    unit = "km/h" if workout.metric else "mph"
-    lo, hi = SPEED_LIMITS[unit]
-    up = round(min(hi, max(lo, workout.speed + 0.5)), 1)
-    incline = min(INCLINE_MAX, workout.incline + 1)
-
-    def speed(value):
-        raw = round(value * 1000)
-        return packet(0xB2, raw >> 8, raw & 0xFF)
-
-    other = up / 1.609344 if workout.metric else up * 1.609344
-    qz_start = [packet(0xB0, 0x01), packet(0xA5), packet(0xD0, 0x00), packet(0xD0, 0x11)]
-    return [
-        {"id": "spd", "label": f"Speed {up} {unit}", "packets": [speed(up)], "response": True,
-         "note": "What the + button sends (B2, write with response). Belt must be moving.", "danger": True},
-        {"id": "spd_nr", "label": f"Speed {up} {unit}, no response", "packets": [speed(up)], "response": False,
-         "note": "Same, written without response like QZ does.", "danger": True},
-        {"id": "spd_other", "label": f"Speed {up} sent as {'mph' if workout.metric else 'km/h'}",
-         "packets": [speed(other)], "response": False,
-         "note": "In case the treadmill expects the other unit. If it reads it as "
-                 f"{unit}, the belt goes to {other:.1f}!", "danger": True},
-        {"id": "inc", "label": f"Incline {incline}%", "packets": [packet(0xB1, incline)], "response": True,
-         "note": "What the incline + button sends (B1, write with response).", "danger": True},
-        {"id": "inc_nr", "label": f"Incline {incline}%, no response", "packets": [packet(0xB1, incline)],
-         "response": False, "note": "Same, written without response like QZ does.", "danger": True},
-        {"id": "qz_start", "label": "QZ start sequence", "packets": qz_start, "response": False,
-         "note": "B0 01 (start), A5, D0 00, D0 11: what QZ sends to start a workout before it "
-                 "changes speed. May start the belt. Then try the speed buttons.", "danger": True},
-        {"id": "d0", "label": "D0 00, D0 11 only", "packets": qz_start[2:], "response": False,
-         "note": "QZ's start sequence without the start command; maybe hands control to the app.",
-         "danger": True},
-    ]
-
 
 # Model code reported in the 0xA1 reply; the Stride-4s reports 0x20.
 MODEL_STRIDE_4S = 0x20
@@ -137,13 +87,6 @@ INIT_STRIDE4 = [
     "f0a10091", "f0a10091", "f0a10091", "f0a10091",
     "f0a30093",
 ]
-
-# Limits for speed/incline set from the page, in the console's unit. The
-# motor base clamps to its own range too.
-SPEED_LIMITS = {"mph": (0.5, 12.0), "km/h": (0.8, 19.3)}
-INCLINE_MAX = 15
-# A target the belt hasn't reached after this long is dropped from the display.
-TARGET_TIMEOUT = 30
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
@@ -368,9 +311,6 @@ class Workout:
         self._last_tick = None
         self._last_active = None
         self.user = None          # who is running; drives the calorie estimate
-        self.target_speed = None  # last speed/incline asked for from the page, until reached
-        self.target_incline = None
-        self._target_speed_at = self._target_incline_at = 0.0
         if store:
             active = store.get_setting("active_user")
             self.user = store.get_user(int(active)) if active else None
@@ -395,25 +335,6 @@ class Workout:
         if bpm:
             self.heart_rate = bpm
             self.hr_seen = True
-
-    def set_target(self, speed=None, incline=None):
-        if speed is not None:
-            self.target_speed = speed
-            self._target_speed_at = time.monotonic()
-        if incline is not None:
-            self.target_incline = incline
-            self._target_incline_at = time.monotonic()
-
-    def _clear_reached_targets(self):
-        now = time.monotonic()
-        if self.target_speed is not None and (
-                not self.connected or self.speed <= 0 or abs(self.speed - self.target_speed) < 0.05
-                or now - self._target_speed_at > TARGET_TIMEOUT):
-            self.target_speed = None
-        if self.target_incline is not None and (
-                not self.connected or self.incline == self.target_incline
-                or now - self._target_incline_at > TARGET_TIMEOUT):
-            self.target_incline = None
 
     def tick(self):
         now = time.monotonic()
@@ -485,18 +406,12 @@ class Workout:
         idle_left = None
         if self.run_id is not None and self.speed <= 0 and self._last_active is not None:
             idle_left = max(0, int(self.idle_timeout - (time.monotonic() - self._last_active)))
-        self._clear_reached_targets()
         return {
             "connected": self.connected,
             "device": self.device,
             "speed": round(self.speed, 2),
             "speed_unit": unit,
             "incline": self.incline,
-            "target_speed": self.target_speed,
-            "target_incline": self.target_incline,
-            "speed_min": SPEED_LIMITS[unit][0],
-            "speed_max": SPEED_LIMITS[unit][1],
-            "incline_max": INCLINE_MAX,
             "heart_rate": self.heart_rate,
             "hr_seen": self.hr_seen,
             "calories": self.run_calories(),
@@ -540,7 +455,6 @@ class StrideBLE:
         self.last_ftms_rx = 0.0
         self.last_d1 = b""
         self.model = None
-        self.challenge = None     # last E0 unlock challenge: {"t": ..., "hex": ...}
         self.packet_log = collections.deque(maxlen=150)
 
     async def find_device(self):
@@ -580,13 +494,12 @@ class StrideBLE:
             return BLEDevice(address, name, {"path": path, "props": {}})
         return None
 
-    async def write(self, hexstr_or_bytes, response=None):
+    async def write(self, hexstr_or_bytes):
         data = bytes.fromhex(hexstr_or_bytes) if isinstance(hexstr_or_bytes, str) else bytes(hexstr_or_bytes)
         if self.debug:
             log.debug("TX %s", data.hex(" "))
         self._log_packet("TX", data)
-        await self.client.write_gatt_char(WRITE_UUID, data,
-                                          response=self.write_response if response is None else response)
+        await self.client.write_gatt_char(WRITE_UUID, data, response=self.write_response)
 
     def _log_packet(self, direction, data):
         """Keep recent traffic for the debug page, skipping the keepalive chatter."""
@@ -597,36 +510,11 @@ class StrideBLE:
             return
         self.packet_log.append({"t": time.time(), "dir": direction, "hex": data.hex(" ")})
 
-    def _require_connected(self):
+    async def send_debug(self, hexstr):
         if self.client is None or not self.client.is_connected or not self.workout.connected:
             raise RuntimeError("treadmill not connected")
-        if not self.has_echelon:
-            raise RuntimeError("this treadmill doesn't accept Echelon commands")
-
-    async def send_debug(self, packets, response=None):
-        self._require_connected()
-        for i, data in enumerate(packets):
-            if i:
-                await asyncio.sleep(0.2)
-            log.info("Debug command: %s%s", bytes(data).hex(" "),
-                     "" if response is None else " (with response)" if response else " (no response)")
-            await self.write(data, response)
-
-    async def set_speed(self, speed):
-        """Ask the belt for a speed, in the console's unit (same scale as 0xD3 packets)."""
-        self._require_connected()
-        raw = round(speed * 1000)
-        pkt = [0xF0, 0xB2, 0x02, raw >> 8, raw & 0xFF]
-        pkt.append(checksum(pkt))
-        log.info("Set speed %.1f", speed)
-        await self.write(pkt)
-
-    async def set_incline(self, incline):
-        self._require_connected()
-        pkt = [0xF0, 0xB1, 0x01, int(incline)]
-        pkt.append(checksum(pkt))
-        log.info("Set incline %d", incline)
-        await self.write(pkt)
+        log.info("Debug command: %s", hexstr)
+        await self.write(hexstr)
 
     def log_gatt(self, client):
         log.info("GATT services offered by the treadmill:")
@@ -668,12 +556,6 @@ class StrideBLE:
         if len(data) < 2:
             return
         kind = data[1]
-        if kind == 0xE0:
-            # The Echelon app answers this with a key from Echelon's servers; until
-            # then the treadmill seems to ignore control commands.
-            self.challenge = {"t": time.time(), "hex": data.hex(" ")}
-            log.info("Treadmill sent an unlock challenge: %s", data.hex(" "))
-            return
         if kind == 0xA1 and len(data) >= 4 and self.model != data[3]:
             self.model = data[3]
             log.info("Treadmill model code 0x%02x", self.model)
@@ -917,25 +799,7 @@ def parse_ftms_treadmill(data):
     return out
 
 
-class DemoTreadmill:
-    """Stands in for StrideBLE in --demo mode: remembers speed/incline set from the page."""
-
-    def __init__(self):
-        self.speed = None
-        self.incline = None
-
-    async def set_speed(self, speed):
-        self.speed = speed
-
-    async def set_incline(self, incline):
-        self.incline = incline
-
-
-def _toward(value, goal, step):
-    return goal if abs(goal - value) <= step else value + math.copysign(step, goal - value)
-
-
-async def demo_loop(workout, demo):
+async def demo_loop(workout):
     """Fake a workout so the page can be tried without a treadmill."""
     workout.connected = True
     workout.device = "DEMO"
@@ -943,19 +807,9 @@ async def demo_loop(workout, demo):
     while True:
         t = time.monotonic() - t0
         # Walk for 50s, then stand still for 20s, so auto-ending runs can be tried.
-        # Once speed or incline is set from the page, ramp toward it like a real belt.
         moving = (t % 70) < 50
-        if not moving:
-            workout.speed = 0.0
-            demo.speed = None
-        elif demo.speed is not None:
-            workout.speed = round(_toward(workout.speed, demo.speed, 0.5), 1)
-        else:
-            workout.speed = round(3.0 + 1.5 * (1 + math.sin(t / 20)), 1)
-        if demo.incline is not None:
-            workout.incline = int(_toward(workout.incline, demo.incline, 1))
-        else:
-            workout.incline = int(3 + 3 * math.sin(t / 45))
+        workout.speed = round(3.0 + 1.5 * (1 + math.sin(t / 20)), 1) if moving else 0.0
+        workout.incline = int(3 + 3 * math.sin(t / 45))
         workout.set_heart_rate(int(110 + workout.speed * 8 + random.randint(-2, 2)))
         workout.tick()
         await asyncio.sleep(1)
@@ -976,7 +830,7 @@ async def csv_logger(workout, path):
                 fh.flush()
 
 
-def make_app(workout, ble=None, controls=None):
+def make_app(workout, ble=None):
     clients = set()
 
     def page(name):
@@ -1094,55 +948,21 @@ def make_app(workout, ble=None, controls=None):
         return web.json_response({
             "connected": workout.connected,
             "model": None if ble is None or ble.model is None else f"0x{ble.model:02x}",
-            "challenge": ble.challenge if ble else None,
             "commands": DEBUG_COMMANDS,
-            "tests": [dict(c, packets=[p.hex(" ") for p in c["packets"]])
-                      for c in speed_test_commands(workout)],
             "packets": list(ble.packet_log) if ble else [],
         })
 
     async def debug_send(request):
-        cmd_id = request.match_info["cmd"]
-        cmd = next((c for c in DEBUG_COMMANDS if c["id"] == cmd_id), None)
-        test = next((c for c in speed_test_commands(workout) if c["id"] == cmd_id), None)
-        if cmd is None and test is None:
+        cmd = next((c for c in DEBUG_COMMANDS if c["id"] == request.match_info["cmd"]), None)
+        if cmd is None:
             raise web.HTTPNotFound()
         if ble is None:
             return web.json_response({"ok": False, "error": "no treadmill in demo mode"}, status=409)
         try:
-            if cmd:
-                await ble.send_debug([bytes.fromhex(cmd["hex"])])
-            else:
-                await ble.send_debug(test["packets"], test["response"])
+            await ble.send_debug(cmd["hex"])
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"ok": False, "error": str(exc)}, status=409)
         return web.json_response({"ok": True})
-
-    async def control(request):
-        """Set the belt speed and/or incline: {"speed": 4.5, "incline": 3}."""
-        if controls is None:
-            return web.json_response({"ok": False, "error": "no treadmill"}, status=409)
-        try:
-            data = await request.json()
-            speed = None if data.get("speed") is None else float(data["speed"])
-            incline = None if data.get("incline") is None else int(round(float(data["incline"])))
-        except (ValueError, TypeError):
-            raise web.HTTPBadRequest(text="speed and incline must be numbers.")
-        lo, hi = SPEED_LIMITS["km/h" if workout.metric else "mph"]
-        try:
-            if speed is not None:
-                if workout.speed <= 0:
-                    return web.json_response(
-                        {"ok": False, "error": "Start the belt on the treadmill first."}, status=409)
-                speed = round(min(hi, max(lo, speed)), 1)
-                await controls.set_speed(speed)
-            if incline is not None:
-                incline = min(INCLINE_MAX, max(0, incline))
-                await controls.set_incline(incline)
-        except Exception as exc:  # noqa: BLE001
-            return web.json_response({"ok": False, "error": str(exc)}, status=409)
-        workout.set_target(speed, incline)
-        return web.json_response({"ok": True, "speed": speed, "incline": incline})
 
     async def runs_api(_request):
         if not workout.store:
@@ -1208,7 +1028,6 @@ def make_app(workout, ble=None, controls=None):
     app.router.add_get("/debug", page("debug.html"))
     app.router.add_get("/api/state", state)
     app.router.add_post("/api/end", end_run)
-    app.router.add_post("/api/control", control)
     app.router.add_get("/api/debug", debug_state)
     app.router.add_post("/api/debug/{cmd}", debug_send)
     app.router.add_get("/api/runs", runs_api)
@@ -1243,13 +1062,11 @@ async def main_async(args):
         store = RunStore(args.db)
         log.info("Saving runs to %s", args.db)
     workout = Workout(metric=args.metric, store=store, idle_timeout=args.idle_timeout)
-    ble = demo = None
-    if args.demo:
-        demo = DemoTreadmill()
-    else:
+    ble = None
+    if not args.demo:
         ble = StrideBLE(workout, args.address, args.name, args.debug, args.protocol,
                         args.disconnect_on_exit)
-    runner = web.AppRunner(make_app(workout, ble, ble or demo))
+    runner = web.AppRunner(make_app(workout, ble))
     await runner.setup()
     await web.TCPSite(runner, args.host, args.port).start()
     log.info("Echelon Monitor version %s%s", APP_VERSION[:7],
@@ -1258,7 +1075,7 @@ async def main_async(args):
 
     tasks = []
     if args.demo:
-        tasks.append(asyncio.create_task(demo_loop(workout, demo)))
+        tasks.append(asyncio.create_task(demo_loop(workout)))
     else:
         tasks.append(asyncio.create_task(ble.run_forever()))
     if args.csv:

@@ -18,6 +18,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.text.TextPaint;
 import android.view.GestureDetector;
 import android.view.HapticFeedbackConstants;
@@ -45,10 +46,14 @@ import java.util.concurrent.TimeUnit;
 /**
  * Floating, draggable box showing live treadmill stats from the server's /api/state.
  * Tap to change which stat is shown large; double-tap to open the app.
+ * Hidden while the app itself is on screen; brings the app up when a run starts.
  */
 public class OverlayService extends Service {
 
     static volatile boolean running = false;
+    /** Set by MainActivity while it's on screen. */
+    private static volatile boolean appVisible = false;
+    private static OverlayService instance;
 
     private static final String CHANNEL = "overlay";
     private static final String ACTION_STOP = "stop";
@@ -95,11 +100,13 @@ public class OverlayService extends Service {
     private String timeText = "0:00", speedText = "0.0", speedUnit = "mph";
     private String distText = "0.00", distUnit = "mi";
     private boolean connected = false;
+    private Boolean runActive;  // null until the first reply from the server
 
     @Override
     public void onCreate() {
         super.onCreate();
         running = true;
+        instance = this;
         startForeground(1, buildNotification());
         baseUrl = prefs().getString(MainActivity.KEY_URL, MainActivity.DEFAULT_URL);
         primary = prefs().getInt("primary", TIME);
@@ -119,13 +126,8 @@ public class OverlayService extends Service {
         lp.x = prefs().getInt("x", dp(16));
         lp.y = prefs().getInt("y", dp(16));
         wm.addView(box, lp);
-        // Once the box has a size: restore its relative position (or convert the
-        // old pixel position into one).
-        box.post(() -> {
-            if (prefs().contains("fx")) place();
-            else savePosition();
-        });
         applyScale();
+        applyVisibility();
         render();
 
         poller = Executors.newSingleThreadScheduledExecutor();
@@ -146,6 +148,7 @@ public class OverlayService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        instance = null;
         WifiWatchdog.stop();
         if (poller != null) poller.shutdownNow();
         if (box != null) {
@@ -161,7 +164,38 @@ public class OverlayService extends Service {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         // Rotation: keep the box in the same relative spot (bottom-right stays bottom-right).
-        if (box != null) box.postDelayed(this::place, 200);
+        // A hidden box has no size; it's placed again when it reappears.
+        if (box != null && !appVisible) box.postDelayed(this::place, 200);
+    }
+
+    // --- visibility -------------------------------------------------------
+
+    /** Called on the main thread by MainActivity's onStart/onStop. */
+    static void setAppVisible(boolean visible) {
+        appVisible = visible;
+        if (instance != null) instance.applyVisibility();
+    }
+
+    private void applyVisibility() {
+        if (box == null) return;
+        box.setVisibility(appVisible ? View.GONE : View.VISIBLE);
+        if (appVisible) return;
+        // Once the box has a size: restore its relative position (or convert the
+        // old pixel position into one).
+        box.post(() -> {
+            if (prefs().contains("fx")) place();
+            else savePosition();
+        });
+    }
+
+    /** Brings the app to the front, turning the screen on if needed. */
+    private void openApp() {
+        startActivity(new Intent(this, MainActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+        if (!getSystemService(PowerManager.class).isInteractive()) {
+            startActivity(new Intent(this, WakeActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION));
+        }
     }
 
     // --- position ---------------------------------------------------------
@@ -366,9 +400,7 @@ public class OverlayService extends Service {
 
                     @Override
                     public boolean onDoubleTap(MotionEvent e) {
-                        startActivity(new Intent(OverlayService.this, MainActivity.class)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                                        | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                        openApp();
                         return true;
                     }
                 });
@@ -452,6 +484,15 @@ public class OverlayService extends Service {
 
     private void show(JSONObject d) {
         connected = d.optBoolean("connected", false);
+        boolean active = d.optBoolean("run_active", false);
+        if (active && Boolean.FALSE.equals(runActive) && !appVisible) {
+            try {
+                openApp();
+            } catch (Exception e) {
+                android.util.Log.w("OverlayService", "Couldn't open the app", e);
+            }
+        }
+        runActive = active;
         speedText = String.format(Locale.US, "%.1f", d.optDouble("speed", 0));
         speedUnit = d.optString("speed_unit", "mph");
         timeText = formatTime(d.optInt("moving_seconds", 0));
