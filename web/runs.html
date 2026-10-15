@@ -13,16 +13,18 @@
 <style>
   :root {
     --bg: #0f1115; --card: #1a1d24; --text: #f2f4f8; --muted: #8b93a3;
-    --accent: #4fc3f7; --hr: #ff7070; --line: #2a2f3a; --bad: #ef5350;
+    --accent: #4fc3f7; --hr: #ff7070; --line: #2a2f3a; --bad: #ef5350; --ok: #66bb6a;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 16px; background: var(--bg); color: var(--text);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; }
-  h1 { font-size: 18px; margin: 0; font-weight: 600; }
-  nav a { color: var(--accent); text-decoration: none; font-size: 15px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .chip { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 999px;
+          padding: 6px 14px; font-size: 14px; cursor: pointer; }
+  .chip.on { background: #22324a; border-color: var(--accent); color: var(--accent); }
+  .who { font-size: 13px; color: var(--muted); margin-top: 2px; }
   .totals { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
   .tile { background: var(--card); border-radius: 14px; padding: 12px 14px; }
   .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
@@ -42,12 +44,15 @@
   .empty { color: var(--muted); text-align: center; padding: 40px 0; }
   [hidden] { display: none !important; }
 </style>
+<link rel="stylesheet" href="/menu.css">
 </head>
 <body>
-<header>
-  <h1>Runs</h1>
-  <nav><a href="/">Live</a></nav>
+<header class="topbar">
+  <button class="menu-btn" id="menuBtn" aria-label="Menu">☰</button>
+  <div class="title"><h1>Runs</h1></div>
 </header>
+
+<div class="filters" id="filters" hidden></div>
 
 <div class="totals" id="totals" hidden>
   <div class="tile"><div class="label">Runs</div><div class="num" id="tRuns">0</div></div>
@@ -134,6 +139,29 @@ async function toggleDetail(card, run) {
   drawChart(canvas, samples);
 }
 
+let filter = "all";
+try { filter = localStorage.getItem("runsFilter") || "all"; } catch (e) {}
+
+function renderFilters(all) {
+  const people = new Map();
+  for (const r of all) people.set(String(r.user_id ?? "none"), r.user_name || "No runner");
+  const box = $("filters");
+  box.textContent = "";
+  box.hidden = people.size < 2 && !(people.size === 1 && !people.has("none"));
+  if (filter !== "all" && !people.has(filter)) filter = "all";
+  const chip = (key, label) => {
+    const c = el("button", "chip" + (filter === key ? " on" : ""), label);
+    c.onclick = () => {
+      filter = key;
+      try { localStorage.setItem("runsFilter", key); } catch (e) {}
+      load();
+    };
+    box.append(c);
+  };
+  chip("all", "Everyone");
+  for (const [key, label] of people) chip(key, label);
+}
+
 async function load() {
   const data = await (await fetch("/api/runs")).json();
   const list = $("list");
@@ -142,9 +170,12 @@ async function load() {
     list.append(el("div", "empty", "Run history is off. Start the app with --db to save runs."));
     return;
   }
-  const runs = data.runs;
+  renderFilters(data.runs);
+  const runs = data.runs.filter((r) => filter === "all" || String(r.user_id ?? "none") === filter);
+  $("totals").hidden = !runs.length;
   if (!runs.length) {
-    list.append(el("div", "empty", "No runs yet. Runs are saved automatically when the belt stops for 3 minutes."));
+    list.append(el("div", "empty", data.runs.length ? "No runs for this person yet."
+      : "No runs yet. Runs are saved automatically when the belt stops for 3 minutes."));
     return;
   }
   const unit = runs[0].dist_unit || "mi", speedUnit = unit === "km" ? "km/h" : "mph";
@@ -157,7 +188,10 @@ async function load() {
   for (const r of runs) {
     const card = el("div", "run");
     const head = el("div", "run-head");
-    head.append(el("div", "when", fmtWhen(r.started)));
+    const left = el("div");
+    left.append(el("div", "when", fmtWhen(r.started)));
+    if (r.user_name) left.append(el("div", "who", r.user_name));
+    head.append(left);
     const dist = el("div", "dist", (r.distance || 0).toFixed(2));
     dist.append(el("span", "unit", r.dist_unit || unit));
     head.append(dist);
@@ -177,5 +211,6 @@ async function load() {
 
 load();
 </script>
+<script src="/menu.js"></script>
 </body>
 </html>

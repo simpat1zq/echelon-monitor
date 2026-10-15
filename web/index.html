@@ -20,11 +20,7 @@
     margin: 0; padding: 16px; background: var(--bg); color: var(--text);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; }
   h1 { font-size: 18px; margin: 0; font-weight: 600; }
-  .status { font-size: 14px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); }
-  .dot.on { background: var(--ok); }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
   .card { background: var(--card); border-radius: 14px; padding: 14px 16px; }
   .card.big { grid-column: 1 / -1; }
@@ -39,18 +35,19 @@
   footer { margin-top: 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
   button { background: var(--card); color: var(--text); border: 1px solid #333a46; border-radius: 8px; padding: 8px 14px; font-size: 14px; }
   code { word-break: break-all; }
-  nav a { color: var(--accent); text-decoration: none; font-size: 15px; }
-  nav { display: flex; align-items: center; gap: 12px; }
-  .fs { padding: 4px 10px; font-size: 16px; line-height: 1; }
   .runbar { margin: -4px 0 12px; font-size: 14px; color: var(--muted); min-height: 1.2em; }
   [hidden] { display: none !important; }
 </style>
+<link rel="stylesheet" href="/menu.css">
 </head>
 <body>
-<header>
-  <h1>Treadmill Live</h1>
-  <nav><a href="/runs">Runs</a> <button id="pip" class="fs" title="Pop out a small always-on-top window" hidden>Pop out</button> <button id="fs" class="fs" title="Full screen">⛶</button></nav>
-  <div class="status"><span class="dot" id="dot"></span><span id="status">Connecting…</span></div>
+<header class="topbar">
+  <button class="menu-btn" id="menuBtn" aria-label="Menu">☰</button>
+  <div class="title">
+    <h1>Treadmill Live</h1>
+    <div class="runner" id="runner"></div>
+  </div>
+  <span class="light" id="dot" title="Treadmill not connected"></span>
 </header>
 
 <div class="runbar" id="runbar"></div>
@@ -121,7 +118,8 @@ function render(d) {
   if (d.run_active && wasActive === false) history.length = 0;  // new run: fresh chart
   wasActive = d.run_active;
   $("dot").classList.toggle("on", d.connected);
-  $("status").textContent = d.connected ? (d.device || "Connected") : "Treadmill not connected";
+  $("dot").title = d.connected ? "Treadmill connected" : "Treadmill not connected";
+  $("runner").textContent = d.user ? d.user.name : (d.history ? "Who's running? Tap to choose" : "");
   $("speed").textContent = d.speed.toFixed(1);
   $("speedUnit").textContent = d.speed_unit;
   $("distance").textContent = d.distance.toFixed(2);
@@ -137,7 +135,6 @@ function render(d) {
   $("runbar").textContent = runStatus(d);
   $("elev").textContent = Math.round(d.elevation_ft);
   $("time").textContent = fmtTime(d.moving_seconds);
-  drawMini(d);
   renderVersion(d);
   history.push(d.speed);
   if (history.length > MAX_POINTS) history.shift();
@@ -177,7 +174,7 @@ function connect() {
   ws.onmessage = (e) => render(JSON.parse(e.data));
   ws.onclose = () => {
     $("dot").classList.remove("on");
-    $("status").textContent = "Server offline – retrying…";
+    $("dot").title = "Server offline – retrying…";
     setTimeout(connect, 2000);
   };
 }
@@ -187,71 +184,6 @@ $("endRun").onclick = async () => {
   await fetch("/api/end", { method: "POST" });
 };
 window.addEventListener("resize", draw);
-
-// "Pop out": draw speed/time/distance onto a small canvas, stream it into a
-// <video> and put that in Picture-in-Picture, which Android shows as a
-// floating window on top of other apps.
-const mini = document.createElement("canvas");
-mini.width = 480; mini.height = 270;
-const miniVideo = document.createElement("video");
-miniVideo.muted = true; miniVideo.playsInline = true;
-let miniStream = null, lastData = null;
-
-function drawMini(d) {
-  lastData = d;
-  const ctx = mini.getContext("2d"), W = mini.width, H = mini.height;
-  ctx.fillStyle = "#0f1115"; ctx.fillRect(0, 0, W, H);
-  ctx.textBaseline = "alphabetic";
-  ctx.fillStyle = d.connected ? "#4fc3f7" : "#8b93a3";
-  ctx.font = "700 110px system-ui, sans-serif";
-  const sp = d.speed.toFixed(1);
-  ctx.fillText(sp, 24, 122);
-  const spW = ctx.measureText(sp).width;
-  ctx.fillStyle = "#8b93a3"; ctx.font = "500 30px system-ui, sans-serif";
-  ctx.fillText(d.speed_unit, 36 + spW, 122);
-  ctx.fillStyle = "#f2f4f8"; ctx.font = "700 64px system-ui, sans-serif";
-  ctx.fillText(fmtTime(d.moving_seconds), 24, 222);
-  const dist = d.distance.toFixed(2);
-  ctx.textAlign = "right";
-  ctx.font = "500 30px system-ui, sans-serif"; ctx.fillStyle = "#8b93a3";
-  const unitW = ctx.measureText(" " + d.distance_unit).width;
-  ctx.fillText(" " + d.distance_unit, W - 24, 222);
-  ctx.font = "700 64px system-ui, sans-serif"; ctx.fillStyle = "#f2f4f8";
-  ctx.fillText(dist, W - 24 - unitW, 222);
-  ctx.textAlign = "left";
-  ctx.font = "500 24px system-ui, sans-serif"; ctx.fillStyle = "#8b93a3";
-  ctx.fillText("TIME", 26, 160);
-  ctx.textAlign = "right"; ctx.fillText("DISTANCE", W - 24, 160); ctx.textAlign = "left";
-  if (!d.connected) {
-    ctx.fillStyle = "#ef5350"; ctx.font = "600 24px system-ui, sans-serif";
-    ctx.textAlign = "right"; ctx.fillText("not connected", W - 24, 40); ctx.textAlign = "left";
-  }
-}
-
-const pipBtn = $("pip");
-pipBtn.hidden = !(document.pictureInPictureEnabled && mini.captureStream);
-pipBtn.onclick = async () => {
-  try {
-    if (document.pictureInPictureElement) { await document.exitPictureInPicture(); return; }
-    if (!miniStream) { miniStream = mini.captureStream(2); miniVideo.srcObject = miniStream; }
-    if (lastData) drawMini(lastData);
-    await miniVideo.play();
-    await miniVideo.requestPictureInPicture();
-  } catch (e) {
-    alert("Couldn't open the pop-out window: " + e.message);
-  }
-};
-// Redraw regularly so the floating window keeps getting frames.
-setInterval(() => { if (lastData && document.pictureInPictureElement) drawMini(lastData); }, 1000);
-
-// Full screen on demand (fallback when the home-screen app isn't installed).
-const fsBtn = $("fs");
-fsBtn.hidden = !document.documentElement.requestFullscreen ||
-  window.matchMedia("(display-mode: fullscreen)").matches;
-fsBtn.onclick = () => {
-  if (document.fullscreenElement) document.exitFullscreen();
-  else document.documentElement.requestFullscreen().catch(() => {});
-};
 
 // Keep the screen on while the dashboard is open.
 let wakeLock = null;
@@ -266,8 +198,11 @@ async function keepAwake() {
 document.addEventListener("visibilitychange", keepAwake);
 keepAwake();
 
+$("runner").onclick = () => window.TreadmillMenu && window.TreadmillMenu.open();
+
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 connect();
 </script>
+<script src="/menu.js"></script>
 </body>
 </html>

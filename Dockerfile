@@ -3,7 +3,9 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY stride_monitor.py index.html runs.html debug.html manifest.webmanifest sw.js icon-192.png icon-512.png favicon.ico apple-touch-icon.png ./
+COPY stride_monitor.py ./
+# web/ also holds echelon-overlay.apk when the CI build downloaded it.
+COPY web/ ./web/
 
 ARG APP_VERSION=dev
 ARG APP_BUILD_DATE=

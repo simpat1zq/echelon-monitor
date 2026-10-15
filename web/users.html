@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0f1115">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<title>Treadmill Users</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #1a1d24; --text: #f2f4f8; --muted: #8b93a3;
+    --accent: #4fc3f7; --line: #2a2f3a; --bad: #ef5350; --ok: #66bb6a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .intro { color: var(--muted); font-size: 14px; line-height: 1.45; margin: 0 0 16px; }
+  .user { background: var(--card); border-radius: 14px; padding: 14px 16px; margin-bottom: 10px;
+          display: flex; align-items: center; gap: 12px; }
+  .user .info { flex: 1; min-width: 0; }
+  .user .name { font-weight: 600; font-size: 16px; }
+  .user .details { font-size: 13px; color: var(--muted); margin-top: 3px; }
+  .badge { font-size: 12px; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px;
+           padding: 2px 8px; margin-left: 8px; vertical-align: 2px; }
+  .btn { background: #22324a; color: var(--text); border: 1px solid #2f4a6a; border-radius: 8px;
+         padding: 8px 14px; font-size: 14px; cursor: pointer; font-family: inherit; }
+  .btn.ghost { background: transparent; border-color: var(--line); }
+  .btn.danger { background: transparent; color: var(--bad); border-color: #4a2b2b; }
+  .btn.wide { width: 100%; padding: 12px; font-size: 16px; }
+  form { background: var(--card); border-radius: 14px; padding: 16px; margin-top: 16px; }
+  form h2 { font-size: 16px; margin: 0 0 12px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  input, select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+                  border-radius: 8px; padding: 10px 12px; font-size: 16px; font-family: inherit; }
+  .row { display: flex; gap: 10px; }
+  .row > div { flex: 1; min-width: 0; }
+  .actions { display: flex; gap: 10px; margin-top: 16px; }
+  .actions .btn { flex: 1; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.4; }
+  .error { color: var(--bad); font-size: 14px; margin-top: 10px; }
+  .empty { color: var(--muted); text-align: center; padding: 24px 0; }
+  [hidden] { display: none !important; }
+</style>
+<link rel="stylesheet" href="/menu.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="menu-btn" id="menuBtn" aria-label="Menu">☰</button>
+  <div class="title"><h1>Users</h1></div>
+</header>
+
+<p class="intro">Pick who's running from the menu. Weight is used to estimate calories from speed and
+  incline. If the treadmill reports heart rate, age and sex make the estimate more accurate.</p>
+
+<div id="list"><div class="empty">Loading…</div></div>
+<button class="btn wide" id="addBtn">Add user</button>
+
+<form id="form" hidden>
+  <h2 id="formTitle">Add user</h2>
+  <label for="name">Name</label>
+  <input id="name" required maxlength="60" autocomplete="off">
+  <div class="row">
+    <div>
+      <label for="weight">Weight (lb)</label>
+      <input id="weight" type="number" inputmode="decimal" min="40" max="700" step="0.1">
+    </div>
+    <div>
+      <label for="age">Age</label>
+      <input id="age" type="number" inputmode="numeric" min="5" max="110" step="1">
+    </div>
+  </div>
+  <div class="row">
+    <div>
+      <label for="feet">Height (ft)</label>
+      <input id="feet" type="number" inputmode="numeric" min="3" max="8" step="1">
+    </div>
+    <div>
+      <label for="inches">(in)</label>
+      <input id="inches" type="number" inputmode="decimal" min="0" max="11.9" step="0.5">
+    </div>
+  </div>
+  <label for="sex">Sex</label>
+  <select id="sex">
+    <option value="">Not specified</option>
+    <option value="male">Male</option>
+    <option value="female">Female</option>
+  </select>
+  <div class="error" id="error" hidden></div>
+  <div class="actions">
+    <button type="button" class="btn ghost" id="cancel">Cancel</button>
+    <button type="submit" class="btn">Save</button>
+  </div>
+  <div class="hint">Without a weight, calories fall back to the treadmill console's own count.</div>
+</form>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const LB = 0.45359237, IN = 2.54;
+let editing = null;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+function describe(u) {
+  const parts = [];
+  if (u.weight_kg) parts.push(Math.round(u.weight_kg / LB) + " lb");
+  if (u.height_cm) {
+    const inches = Math.round(u.height_cm / IN);
+    parts.push(Math.floor(inches / 12) + "′" + (inches % 12) + "″");
+  }
+  if (u.age) parts.push(u.age + " yrs");
+  if (u.sex) parts.push(u.sex === "male" ? "Male" : "Female");
+  return parts.length ? parts.join(" · ") : "No details yet";
+}
+
+async function load() {
+  const data = await (await fetch("/api/users")).json();
+  const list = $("list");
+  list.textContent = "";
+  if (!data.history) {
+    list.append(el("div", "empty", "Users need run history turned on (start the app with --db)."));
+    $("addBtn").hidden = true;
+    return;
+  }
+  if (!data.users.length) list.append(el("div", "empty", "No users yet."));
+  for (const u of data.users) {
+    const card = el("div", "user");
+    const info = el("div", "info");
+    const name = el("div", "name", u.name);
+    if (u.id === data.active_id) name.append(el("span", "badge", "running"));
+    info.append(name, el("div", "details", describe(u)));
+    const edit = el("button", "btn ghost", "Edit");
+    edit.onclick = () => openForm(u);
+    const del = el("button", "btn danger", "Delete");
+    del.onclick = async () => {
+      if (!confirm(`Delete ${u.name}? Their runs are kept but no longer linked to them.`)) return;
+      await fetch("/api/users/" + u.id, { method: "DELETE" });
+      refresh();
+    };
+    card.append(info, edit, del);
+    list.append(card);
+  }
+}
+
+function openForm(u) {
+  editing = u ? u.id : null;
+  $("formTitle").textContent = u ? "Edit " + u.name : "Add user";
+  $("name").value = u ? u.name : "";
+  $("weight").value = u && u.weight_kg ? (u.weight_kg / LB).toFixed(1).replace(/\.0$/, "") : "";
+  $("age").value = u && u.age ? u.age : "";
+  if (u && u.height_cm) {
+    const inches = u.height_cm / IN;
+    $("feet").value = Math.floor(inches / 12);
+    $("inches").value = Math.round((inches % 12) * 2) / 2;
+  } else {
+    $("feet").value = ""; $("inches").value = "";
+  }
+  $("sex").value = u && u.sex ? u.sex : "";
+  $("error").hidden = true;
+  $("form").hidden = false;
+  $("addBtn").hidden = true;
+  $("form").scrollIntoView({ behavior: "smooth" });
+  $("name").focus();
+}
+
+function closeForm() {
+  $("form").hidden = true;
+  $("addBtn").hidden = false;
+  editing = null;
+}
+
+$("addBtn").onclick = () => openForm(null);
+$("cancel").onclick = closeForm;
+$("form").onsubmit = async (e) => {
+  e.preventDefault();
+  const num = (id) => ($(id).value.trim() === "" ? null : Number($(id).value));
+  const lb = num("weight"), ft = num("feet"), inch = num("inches");
+  const body = {
+    name: $("name").value.trim(),
+    weight_kg: lb == null ? null : +(lb * LB).toFixed(4),
+    height_cm: ft == null && inch == null ? null : +(((ft || 0) * 12 + (inch || 0)) * IN).toFixed(1),
+    age: num("age"),
+    sex: $("sex").value || null,
+  };
+  const r = await fetch(editing ? "/api/users/" + editing : "/api/users", {
+    method: editing ? "PUT" : "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    $("error").textContent = await r.text();
+    $("error").hidden = false;
+    return;
+  }
+  closeForm();
+  refresh();
+};
+
+function refresh() {
+  load();
+  if (window.TreadmillMenu) window.TreadmillMenu.reload();
+}
+document.addEventListener("runnerchange", load);
+load();
+</script>
+<script src="/menu.js"></script>
+</body>
+</html>

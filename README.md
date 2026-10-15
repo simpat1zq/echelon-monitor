@@ -98,6 +98,23 @@ treadmill's metal frame cut that down. If the logs show repeated disconnects,
 use a USB Bluetooth 5.0 dongle on a USB extension cable placed closer to the
 treadmill.
 
+## Menu, users and the Android overlay
+
+The ☰ menu on every page links to Live, Runs, **Manage users** and the
+**Android overlay app**, and lists your users so you can pick who's running.
+The light in the header is green while the treadmill is connected.
+
+- **Users** store weight, height, age and sex. Calories are estimated for the
+  selected runner with the ACSM treadmill equations (weight, speed, incline), or
+  with the Keytel heart-rate formula when the treadmill reports a heart rate. With
+  nobody selected, calories come from the console's own count. Runs are saved
+  under the runner, and the Runs page can filter by person.
+- **Android overlay app** (`android/`): a small app that shows speed, time and
+  distance in a floating box over other apps, such as Jellyfin. GitHub Actions
+  builds it and publishes `echelon-overlay.apk` to the `android` release. The
+  Docker image includes the latest APK, so the menu can offer it at
+  `/echelon-overlay.apk`.
+
 ## Runs
 
 A run starts automatically when the belt starts moving. It ends when the belt has

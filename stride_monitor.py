@@ -89,6 +89,7 @@ INIT_STRIDE4 = [
 ]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+WEB = os.path.join(HERE, "web")
 # Set by the Docker build (GitHub Actions passes the commit SHA and build time).
 APP_VERSION = os.environ.get("APP_VERSION", "dev")
 APP_BUILD_DATE = os.environ.get("APP_BUILD_DATE", "")
@@ -128,21 +129,80 @@ class RunStore:
                 calories INTEGER
             );
             CREATE INDEX IF NOT EXISTS samples_run ON samples(run_id);
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                weight_kg REAL,
+                height_cm REAL,
+                age INTEGER,
+                sex TEXT
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
         """)
         # Add columns introduced after the first release.
-        for table in ("runs", "samples"):
+        for table, col, kind in (("runs", "calories", "INTEGER"), ("samples", "calories", "INTEGER"),
+                                 ("runs", "user_id", "INTEGER")):
             cols = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
-            if "calories" not in cols:
-                self.db.execute(f"ALTER TABLE {table} ADD COLUMN calories INTEGER")
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
         self.db.commit()
         # Finish runs left open by a crash or restart.
         for row in self.db.execute("SELECT id FROM runs WHERE ended IS NULL").fetchall():
             self.finish(row["id"])
 
-    def start(self, started, dist_unit):
-        cur = self.db.execute("INSERT INTO runs (started, dist_unit) VALUES (?, ?)", (started, dist_unit))
+    def start(self, started, dist_unit, user_id=None):
+        cur = self.db.execute("INSERT INTO runs (started, dist_unit, user_id) VALUES (?, ?, ?)",
+                              (started, dist_unit, user_id))
         self.db.commit()
         return cur.lastrowid
+
+    def set_run_user(self, run_id, user_id):
+        self.db.execute("UPDATE runs SET user_id = ? WHERE id = ?", (user_id, run_id))
+        self.db.commit()
+
+    # --- users ---
+
+    USER_FIELDS = ("name", "weight_kg", "height_cm", "age", "sex")
+
+    def list_users(self):
+        return [dict(r) for r in self.db.execute("SELECT * FROM users ORDER BY name COLLATE NOCASE")]
+
+    def get_user(self, user_id):
+        if user_id is None:
+            return None
+        r = self.db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return dict(r) if r else None
+
+    def save_user(self, data, user_id=None):
+        vals = [data.get(f) for f in self.USER_FIELDS]
+        if user_id is None:
+            cur = self.db.execute(f"INSERT INTO users ({', '.join(self.USER_FIELDS)}) VALUES (?, ?, ?, ?, ?)",
+                                  vals)
+            user_id = cur.lastrowid
+        else:
+            self.db.execute(f"UPDATE users SET {', '.join(f + ' = ?' for f in self.USER_FIELDS)} WHERE id = ?",
+                            vals + [user_id])
+        self.db.commit()
+        return self.get_user(user_id)
+
+    def delete_user(self, user_id):
+        self.db.execute("UPDATE runs SET user_id = NULL WHERE user_id = ?", (user_id,))
+        self.db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        if self.get_setting("active_user") == str(user_id):
+            self.set_setting("active_user", None)
+        self.db.commit()
+
+    def get_setting(self, key):
+        r = self.db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return r[0] if r else None
+
+    def set_setting(self, key, value):
+        self.db.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+        self.db.commit()
 
     def add_sample(self, run_id, t, speed, incline, hr, distance, elevation_ft, calories=None):
         self.db.execute("INSERT INTO samples (run_id, t, speed, incline, hr, distance, elevation_ft, calories)"
@@ -185,13 +245,42 @@ class RunStore:
         self.db.commit()
 
     def list_runs(self):
-        rows = self.db.execute("SELECT * FROM runs WHERE ended IS NOT NULL ORDER BY started DESC")
+        rows = self.db.execute("""
+            SELECT runs.*, users.name AS user_name FROM runs
+            LEFT JOIN users ON users.id = runs.user_id
+            WHERE runs.ended IS NOT NULL ORDER BY runs.started DESC""")
         return [dict(r) for r in rows]
 
     def samples(self, run_id):
         rows = self.db.execute("SELECT t, speed, incline, hr FROM samples WHERE run_id = ? ORDER BY t",
                                (run_id,))
         return [dict(r) for r in rows]
+
+
+def kcal_per_minute(user, speed_kmh, grade_pct, heart_rate=0):
+    """Energy expenditure for one runner.
+
+    With a heart rate plus age and sex, uses Keytel et al. (2005). Otherwise uses
+    the ACSM treadmill equations, which need only weight, speed and grade
+    (walking below ~6.4 km/h, running above).
+    """
+    weight = user.get("weight_kg") or 0
+    if not weight or speed_kmh <= 0:
+        return 0.0
+    age, sex = user.get("age"), user.get("sex")
+    if heart_rate and age and sex in ("male", "female"):
+        if sex == "male":
+            kj = -55.0969 + 0.6309 * heart_rate + 0.1988 * weight + 0.2017 * age
+        else:
+            kj = -20.4022 + 0.4472 * heart_rate - 0.1263 * weight + 0.074 * age
+        return max(0.0, kj / 4.184)
+    m_per_min = speed_kmh * 1000 / 60
+    grade = max(0.0, grade_pct) / 100
+    if speed_kmh < 6.4:
+        vo2 = 0.1 * m_per_min + 1.8 * m_per_min * grade + 3.5
+    else:
+        vo2 = 0.2 * m_per_min + 0.9 * m_per_min * grade + 3.5
+    return vo2 * weight / 1000 * 5  # ml/kg/min -> L/min -> ~5 kcal per litre O2
 
 
 class Workout:
@@ -221,6 +310,10 @@ class Workout:
         self.last_saved = None    # summary of the run that just ended
         self._last_tick = None
         self._last_active = None
+        self.user = None          # who is running; drives the calorie estimate
+        if store:
+            active = store.get_setting("active_user")
+            self.user = store.get_user(int(active)) if active else None
         self.reset_stats()
 
     def reset_stats(self):
@@ -228,6 +321,15 @@ class Workout:
         self.elevation_ft = 0.0
         self.moving_seconds = 0.0
         self.max_speed = 0.0
+        self.kcal = 0.0           # estimated for self.user
+
+    def set_user(self, user):
+        self.user = user
+        if self.store:
+            self.store.set_setting("active_user", str(user["id"]) if user else None)
+            if self.run_id:
+                self.store.set_run_user(self.run_id, user["id"] if user else None)
+        log.info("Runner: %s", user["name"] if user else "nobody")
 
     def set_heart_rate(self, bpm):
         if bpm:
@@ -246,6 +348,10 @@ class Workout:
             miles = step if not self.metric else step / 1.60934
             self.elevation_ft += miles * 5280 * self.incline / 100.0
             self.max_speed = max(self.max_speed, self.speed)
+            if self.user:
+                kmh = self.speed if self.metric else self.speed * 1.60934
+                hr = self.heart_rate if self.hr_seen else 0
+                self.kcal += kcal_per_minute(self.user, kmh, self.incline, hr) * dt / 60
         if self.speed > 0:
             self._last_active = now
         elif self.run_id is not None and now - self._last_active >= self.idle_timeout:
@@ -260,7 +366,8 @@ class Workout:
         self._last_active = time.monotonic()
         self._run_cal_start = self.calories
         if self.store:
-            self.run_id = self.store.start(self.run_started, "km" if self.metric else "mi")
+            self.run_id = self.store.start(self.run_started, "km" if self.metric else "mi",
+                                           self.user["id"] if self.user else None)
         else:
             self.run_id = 0
         log.info("Run started.")
@@ -278,10 +385,12 @@ class Workout:
         if self.run_id and self.store:
             self.store.add_sample(self.run_id, time.time(), round(self.speed, 2), self.incline,
                                   self.heart_rate if self.hr_seen else None,
-                                  round(self.distance, 4), round(self.elevation_ft, 1), self.calories)
+                                  round(self.distance, 4), round(self.elevation_ft, 1), self.run_calories())
 
     def run_calories(self):
-        """Calories burned this run, from the console's running total."""
+        """Calories burned this run: estimated for the runner, else the console's count."""
+        if self.user and self.user.get("weight_kg"):
+            return round(self.kcal)
         if self.calories is None:
             return None
         if self._run_cal_start is None or self.calories < self._run_cal_start:
@@ -317,6 +426,7 @@ class Workout:
             "idle_left": idle_left,
             "last_saved": self.last_saved,
             "history": self.store is not None,
+            "user": {"id": self.user["id"], "name": self.user["name"]} if self.user else None,
             "raw": self.raw,
             "ts": time.time(),
             "version": APP_VERSION,
@@ -724,8 +834,90 @@ async def csv_logger(workout, path):
 def make_app(workout, ble=None):
     clients = set()
 
-    async def debug_page(_request):
-        return web.FileResponse(os.path.join(HERE, "debug.html"))
+    def page(name):
+        async def handler(_request):
+            resp = web.FileResponse(os.path.join(WEB, name))
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+        return handler
+
+    content_types = {".webmanifest": "application/manifest+json", ".js": "text/javascript",
+                     ".css": "text/css", ".apk": "application/vnd.android.package-archive",
+                     ".ico": "image/x-icon", ".png": "image/png"}
+
+    async def static_file(request):
+        name = request.match_info["name"]
+        ext = os.path.splitext(name)[1]
+        path = os.path.join(WEB, name)
+        if ext not in content_types or not os.path.isfile(path):
+            raise web.HTTPNotFound()
+        resp = web.FileResponse(path)
+        resp.content_type = content_types[ext]
+        if ext in (".js", ".css", ".webmanifest"):
+            resp.headers["Cache-Control"] = "no-cache"
+        if ext == ".apk":
+            resp.headers["Content-Disposition"] = f'attachment; filename="{name}"'
+        return resp
+
+    def need_store():
+        if not workout.store:
+            raise web.HTTPConflict(text="Run history is off (start with --db).")
+        return workout.store
+
+    def parse_user(data):
+        name = str(data.get("name", "")).strip()
+        if not name:
+            raise web.HTTPBadRequest(text="Name is required.")
+
+        def num(key, cast=float):
+            v = data.get(key)
+            if v in (None, ""):
+                return None
+            try:
+                return cast(v)
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text=f"{key} must be a number.")
+
+        sex = data.get("sex") if data.get("sex") in ("male", "female") else None
+        return {"name": name[:60], "weight_kg": num("weight_kg"), "height_cm": num("height_cm"),
+                "age": num("age", int), "sex": sex}
+
+    async def users_api(_request):
+        if not workout.store:
+            return web.json_response({"history": False, "users": [], "active_id": None})
+        return web.json_response({"history": True, "users": workout.store.list_users(),
+                                  "active_id": workout.user["id"] if workout.user else None})
+
+    async def user_create(request):
+        user = need_store().save_user(parse_user(await request.json()))
+        return web.json_response(user)
+
+    async def user_update(request):
+        store = need_store()
+        user_id = int(request.match_info["user_id"])
+        if not store.get_user(user_id):
+            raise web.HTTPNotFound()
+        user = store.save_user(parse_user(await request.json()), user_id)
+        if workout.user and workout.user["id"] == user_id:
+            workout.user = user
+        return web.json_response(user)
+
+    async def user_delete(request):
+        store = need_store()
+        user_id = int(request.match_info["user_id"])
+        if workout.user and workout.user["id"] == user_id:
+            workout.set_user(None)
+        store.delete_user(user_id)
+        return web.json_response({"ok": True})
+
+    async def user_activate(request):
+        store = need_store()
+        data = await request.json()
+        user = store.get_user(data.get("id")) if data.get("id") is not None else None
+        if data.get("id") is not None and not user:
+            raise web.HTTPNotFound()
+        workout.set_user(user)
+        return web.json_response({"ok": True, "active_id": user["id"] if user else None})
 
     async def debug_state(_request):
         return web.json_response({
@@ -746,22 +938,6 @@ def make_app(workout, ble=None):
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"ok": False, "error": str(exc)}, status=409)
         return web.json_response({"ok": True})
-
-    async def index(_request):
-        return web.FileResponse(os.path.join(HERE, "index.html"))
-
-    def static(name, content_type=None, cache=True):
-        async def handler(_request):
-            resp = web.FileResponse(os.path.join(HERE, name))
-            if content_type:
-                resp.content_type = content_type
-            if not cache:
-                resp.headers["Cache-Control"] = "no-cache"
-            return resp
-        return handler
-
-    async def runs_page(_request):
-        return web.FileResponse(os.path.join(HERE, "runs.html"))
 
     async def runs_api(_request):
         if not workout.store:
@@ -821,23 +997,24 @@ def make_app(workout, ble=None):
         task.cancel()
 
     app = web.Application()
-    app.router.add_get("/", index)
+    app.router.add_get("/", page("index.html"))
+    app.router.add_get("/runs", page("runs.html"))
+    app.router.add_get("/users", page("users.html"))
+    app.router.add_get("/debug", page("debug.html"))
     app.router.add_get("/api/state", state)
     app.router.add_post("/api/end", end_run)
-    app.router.add_get("/debug", debug_page)
     app.router.add_get("/api/debug", debug_state)
     app.router.add_post("/api/debug/{cmd}", debug_send)
-    app.router.add_get("/runs", runs_page)
-    app.router.add_get("/manifest.webmanifest", static("manifest.webmanifest", "application/manifest+json"))
-    app.router.add_get("/sw.js", static("sw.js", "text/javascript", cache=False))
-    app.router.add_get("/icon-192.png", static("icon-192.png"))
-    app.router.add_get("/icon-512.png", static("icon-512.png"))
-    app.router.add_get("/favicon.ico", static("favicon.ico", "image/x-icon"))
-    app.router.add_get("/apple-touch-icon.png", static("apple-touch-icon.png"))
     app.router.add_get("/api/runs", runs_api)
     app.router.add_get("/api/runs/{run_id:\\d+}/samples", run_samples)
     app.router.add_delete("/api/runs/{run_id:\\d+}", run_delete)
+    app.router.add_get("/api/users", users_api)
+    app.router.add_post("/api/users", user_create)
+    app.router.add_put("/api/users/{user_id:\\d+}", user_update)
+    app.router.add_delete("/api/users/{user_id:\\d+}", user_delete)
+    app.router.add_post("/api/users/active", user_activate)
     app.router.add_get("/ws", ws_handler)
+    app.router.add_get("/{name:[A-Za-z0-9._-]+}", static_file)
     app.cleanup_ctx.append(broadcaster)
     return app
 
