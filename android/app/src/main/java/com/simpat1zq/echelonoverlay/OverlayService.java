@@ -190,19 +190,18 @@ public class OverlayService extends Service {
             case TIME:
                 value.setText(timeText);
                 unit.setText("");
-                value.setTextColor(WHITE);
                 break;
             case SPEED:
                 value.setText(speedText);
                 unit.setText(speedUnit);
-                value.setTextColor(big && connected ? BLUE : WHITE);
                 break;
             default:
                 value.setText(distText);
                 unit.setText(distUnit);
-                value.setTextColor(WHITE);
                 break;
         }
+        // Whichever stat is big is shown in blue while the treadmill is connected.
+        value.setTextColor(big && connected ? BLUE : WHITE);
         unit.setTextColor(MUTED);
         unit.setVisibility(unit.getText().length() == 0 ? View.GONE : View.VISIBLE);
     }
