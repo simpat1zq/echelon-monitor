@@ -832,6 +832,8 @@ def make_app(workout, ble=None):
     app.router.add_get("/sw.js", static("sw.js", "text/javascript", cache=False))
     app.router.add_get("/icon-192.png", static("icon-192.png"))
     app.router.add_get("/icon-512.png", static("icon-512.png"))
+    app.router.add_get("/favicon.ico", static("favicon.ico", "image/x-icon"))
+    app.router.add_get("/apple-touch-icon.png", static("apple-touch-icon.png"))
     app.router.add_get("/api/runs", runs_api)
     app.router.add_get("/api/runs/{run_id:\\d+}/samples", run_samples)
     app.router.add_delete("/api/runs/{run_id:\\d+}", run_delete)
