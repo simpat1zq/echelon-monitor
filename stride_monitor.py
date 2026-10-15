@@ -51,6 +51,9 @@ INIT_GENERIC = [
 # Commands the debug page can send. All are taken from the Echelon Fit app
 # (mostly its wired/serial console path, which the built-in tablet uses).
 DEBUG_COMMANDS = [
+    {"id": "c71", "hex": "f071030000ff63", "label": "71 00 00 FF (phone app, on connect)",
+     "note": "The phone app sends this once, half a second after the treadmill's first "
+             "reply. Best candidate for the blank console fields.", "danger": False},
     {"id": "start", "hex": "f0b00101a2", "label": "Start workout (B0 01)",
      "note": "What the app sends when a workout starts. On this treadmill it may start "
              "the belt (possibly after a countdown).", "danger": True},
