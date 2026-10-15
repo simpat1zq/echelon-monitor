@@ -88,6 +88,13 @@ INIT_STRIDE4 = [
     "f0a30093",
 ]
 
+# Limits for speed/incline set from the page, in the console's unit. The
+# motor base clamps to its own range too.
+SPEED_LIMITS = {"mph": (0.5, 12.0), "km/h": (0.8, 19.3)}
+INCLINE_MAX = 15
+# A target the belt hasn't reached after this long is dropped from the display.
+TARGET_TIMEOUT = 30
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
 # Set by the Docker build (GitHub Actions passes the commit SHA and build time).
@@ -311,6 +318,9 @@ class Workout:
         self._last_tick = None
         self._last_active = None
         self.user = None          # who is running; drives the calorie estimate
+        self.target_speed = None  # last speed/incline asked for from the page, until reached
+        self.target_incline = None
+        self._target_speed_at = self._target_incline_at = 0.0
         if store:
             active = store.get_setting("active_user")
             self.user = store.get_user(int(active)) if active else None
@@ -335,6 +345,25 @@ class Workout:
         if bpm:
             self.heart_rate = bpm
             self.hr_seen = True
+
+    def set_target(self, speed=None, incline=None):
+        if speed is not None:
+            self.target_speed = speed
+            self._target_speed_at = time.monotonic()
+        if incline is not None:
+            self.target_incline = incline
+            self._target_incline_at = time.monotonic()
+
+    def _clear_reached_targets(self):
+        now = time.monotonic()
+        if self.target_speed is not None and (
+                not self.connected or self.speed <= 0 or abs(self.speed - self.target_speed) < 0.05
+                or now - self._target_speed_at > TARGET_TIMEOUT):
+            self.target_speed = None
+        if self.target_incline is not None and (
+                not self.connected or self.incline == self.target_incline
+                or now - self._target_incline_at > TARGET_TIMEOUT):
+            self.target_incline = None
 
     def tick(self):
         now = time.monotonic()
@@ -406,12 +435,18 @@ class Workout:
         idle_left = None
         if self.run_id is not None and self.speed <= 0 and self._last_active is not None:
             idle_left = max(0, int(self.idle_timeout - (time.monotonic() - self._last_active)))
+        self._clear_reached_targets()
         return {
             "connected": self.connected,
             "device": self.device,
             "speed": round(self.speed, 2),
             "speed_unit": unit,
             "incline": self.incline,
+            "target_speed": self.target_speed,
+            "target_incline": self.target_incline,
+            "speed_min": SPEED_LIMITS[unit][0],
+            "speed_max": SPEED_LIMITS[unit][1],
+            "incline_max": INCLINE_MAX,
             "heart_rate": self.heart_rate,
             "hr_seen": self.hr_seen,
             "calories": self.run_calories(),
@@ -511,11 +546,32 @@ class StrideBLE:
             return
         self.packet_log.append({"t": time.time(), "dir": direction, "hex": data.hex(" ")})
 
-    async def send_debug(self, hexstr):
+    def _require_connected(self):
         if self.client is None or not self.client.is_connected or not self.workout.connected:
             raise RuntimeError("treadmill not connected")
+        if not self.has_echelon:
+            raise RuntimeError("this treadmill doesn't accept Echelon commands")
+
+    async def send_debug(self, hexstr):
+        self._require_connected()
         log.info("Debug command: %s", hexstr)
         await self.write(hexstr)
+
+    async def set_speed(self, speed):
+        """Ask the belt for a speed, in the console's unit (same scale as 0xD3 packets)."""
+        self._require_connected()
+        raw = round(speed * 1000)
+        pkt = [0xF0, 0xB2, 0x02, raw >> 8, raw & 0xFF]
+        pkt.append(checksum(pkt))
+        log.info("Set speed %.1f", speed)
+        await self.write(pkt)
+
+    async def set_incline(self, incline):
+        self._require_connected()
+        pkt = [0xF0, 0xB1, 0x01, int(incline)]
+        pkt.append(checksum(pkt))
+        log.info("Set incline %d", incline)
+        await self.write(pkt)
 
     def log_gatt(self, client):
         log.info("GATT services offered by the treadmill:")
@@ -800,7 +856,25 @@ def parse_ftms_treadmill(data):
     return out
 
 
-async def demo_loop(workout):
+class DemoTreadmill:
+    """Stands in for StrideBLE in --demo mode: remembers speed/incline set from the page."""
+
+    def __init__(self):
+        self.speed = None
+        self.incline = None
+
+    async def set_speed(self, speed):
+        self.speed = speed
+
+    async def set_incline(self, incline):
+        self.incline = incline
+
+
+def _toward(value, goal, step):
+    return goal if abs(goal - value) <= step else value + math.copysign(step, goal - value)
+
+
+async def demo_loop(workout, demo):
     """Fake a workout so the page can be tried without a treadmill."""
     workout.connected = True
     workout.device = "DEMO"
@@ -808,9 +882,19 @@ async def demo_loop(workout):
     while True:
         t = time.monotonic() - t0
         # Walk for 50s, then stand still for 20s, so auto-ending runs can be tried.
+        # Once speed or incline is set from the page, ramp toward it like a real belt.
         moving = (t % 70) < 50
-        workout.speed = round(3.0 + 1.5 * (1 + math.sin(t / 20)), 1) if moving else 0.0
-        workout.incline = int(3 + 3 * math.sin(t / 45))
+        if not moving:
+            workout.speed = 0.0
+            demo.speed = None
+        elif demo.speed is not None:
+            workout.speed = round(_toward(workout.speed, demo.speed, 0.5), 1)
+        else:
+            workout.speed = round(3.0 + 1.5 * (1 + math.sin(t / 20)), 1)
+        if demo.incline is not None:
+            workout.incline = int(_toward(workout.incline, demo.incline, 1))
+        else:
+            workout.incline = int(3 + 3 * math.sin(t / 45))
         workout.set_heart_rate(int(110 + workout.speed * 8 + random.randint(-2, 2)))
         workout.tick()
         await asyncio.sleep(1)
@@ -831,7 +915,7 @@ async def csv_logger(workout, path):
                 fh.flush()
 
 
-def make_app(workout, ble=None):
+def make_app(workout, ble=None, controls=None):
     clients = set()
 
     def page(name):
@@ -965,6 +1049,32 @@ def make_app(workout, ble=None):
             return web.json_response({"ok": False, "error": str(exc)}, status=409)
         return web.json_response({"ok": True})
 
+    async def control(request):
+        """Set the belt speed and/or incline: {"speed": 4.5, "incline": 3}."""
+        if controls is None:
+            return web.json_response({"ok": False, "error": "no treadmill"}, status=409)
+        try:
+            data = await request.json()
+            speed = None if data.get("speed") is None else float(data["speed"])
+            incline = None if data.get("incline") is None else int(round(float(data["incline"])))
+        except (ValueError, TypeError):
+            raise web.HTTPBadRequest(text="speed and incline must be numbers.")
+        lo, hi = SPEED_LIMITS["km/h" if workout.metric else "mph"]
+        try:
+            if speed is not None:
+                if workout.speed <= 0:
+                    return web.json_response(
+                        {"ok": False, "error": "Start the belt on the treadmill first."}, status=409)
+                speed = round(min(hi, max(lo, speed)), 1)
+                await controls.set_speed(speed)
+            if incline is not None:
+                incline = min(INCLINE_MAX, max(0, incline))
+                await controls.set_incline(incline)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(exc)}, status=409)
+        workout.set_target(speed, incline)
+        return web.json_response({"ok": True, "speed": speed, "incline": incline})
+
     async def runs_api(_request):
         if not workout.store:
             return web.json_response({"history": False, "runs": []})
@@ -1029,6 +1139,7 @@ def make_app(workout, ble=None):
     app.router.add_get("/debug", page("debug.html"))
     app.router.add_get("/api/state", state)
     app.router.add_post("/api/end", end_run)
+    app.router.add_post("/api/control", control)
     app.router.add_get("/api/debug", debug_state)
     app.router.add_post("/api/debug/{cmd}", debug_send)
     app.router.add_get("/api/runs", runs_api)
@@ -1063,11 +1174,13 @@ async def main_async(args):
         store = RunStore(args.db)
         log.info("Saving runs to %s", args.db)
     workout = Workout(metric=args.metric, store=store, idle_timeout=args.idle_timeout)
-    ble = None
-    if not args.demo:
+    ble = demo = None
+    if args.demo:
+        demo = DemoTreadmill()
+    else:
         ble = StrideBLE(workout, args.address, args.name, args.debug, args.protocol,
                         args.disconnect_on_exit)
-    runner = web.AppRunner(make_app(workout, ble))
+    runner = web.AppRunner(make_app(workout, ble, ble or demo))
     await runner.setup()
     await web.TCPSite(runner, args.host, args.port).start()
     log.info("Echelon Monitor version %s%s", APP_VERSION[:7],
@@ -1076,7 +1189,7 @@ async def main_async(args):
 
     tasks = []
     if args.demo:
-        tasks.append(asyncio.create_task(demo_loop(workout)))
+        tasks.append(asyncio.create_task(demo_loop(workout, demo)))
     else:
         tasks.append(asyncio.create_task(ble.run_forever()))
     if args.csv:

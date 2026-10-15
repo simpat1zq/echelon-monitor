@@ -115,6 +115,22 @@ The light in the header is green while the treadmill is connected.
   Docker image includes the latest APK, so the menu can offer it at
   `/echelon-overlay.apk`.
 
+## Changing speed and incline
+
+The Live page has **−** and **+** buttons for speed and incline. A tap changes
+speed by 0.1 and incline by 1%. Holding a button keeps going: speed changes by
+1 per second, incline by 1% per second. While the belt is still getting there,
+the target shows in small text under the current value (for example `→ 6.5 mph`).
+
+Speed can only be changed while the belt is moving; start and stop the belt on
+the treadmill itself. The commands (`F0 B2` for speed, `F0 B1` for incline) come
+from QZ's `echelonstride` driver. Other programs can use `POST /api/control`
+with `{"speed": 6.5}` and/or `{"incline": 3}`.
+
+The Android app also restarts the tablet's Wi-Fi when it has been disconnected
+for 5 minutes, at most once every 30 minutes. Android 10 and newer don't let
+apps switch Wi-Fi, so there the app only shows a message.
+
 ## Runs
 
 A run starts automatically when the belt starts moving. It ends when the belt has

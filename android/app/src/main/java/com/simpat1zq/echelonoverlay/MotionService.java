@@ -44,7 +44,7 @@ public class MotionService extends Service {
     private static final String TAG = "MotionService";
     private static final String CHANNEL = "motion";
     private static final String ACTION_STOP = "stop";
-    private static final long CHECK_EVERY_MS = 2000;
+    private static final long CHECK_EVERY_MS = 4000;
     private static final int GRID_W = 32, GRID_H = 24;
     private static final int CELL_DIFF = 14;           // brightness change (0-255) that counts
     private static final float CHANGED_FRACTION = 0.03f; // share of cells that must change
@@ -76,6 +76,7 @@ public class MotionService extends Service {
         thread.start();
         bg = new Handler(thread.getLooper());
         bg.post(this::openCamera);
+        WifiWatchdog.start(this);
     }
 
     @Override
@@ -90,6 +91,7 @@ public class MotionService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        WifiWatchdog.stop();
         bg.post(this::closeCamera);
         thread.quitSafely();
         if (cpuLock.isHeld()) cpuLock.release();
