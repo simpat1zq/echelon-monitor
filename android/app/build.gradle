@@ -1,0 +1,38 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.simpat1zq.echelonoverlay'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.simpat1zq.echelonoverlay'
+        minSdk 26          // TYPE_APPLICATION_OVERLAY
+        targetSdk 33
+        versionCode((project.findProperty('versionCode') ?: '1') as int)
+        versionName "1.0.${versionCode}"
+    }
+
+    // A fixed key so new builds install as updates over old ones. It only
+    // signs this sideloaded hobby app, so it lives in the repo.
+    signingConfigs {
+        shared {
+            storeFile file('signing.keystore')
+            storePassword 'echelon'
+            keyAlias 'overlay'
+            keyPassword 'echelon'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.shared
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
