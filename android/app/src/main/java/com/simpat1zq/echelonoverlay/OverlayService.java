@@ -135,6 +135,8 @@ public class OverlayService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(MainActivity.KEY_OVERLAY, false).apply();
             stopSelf();
         }
         return START_STICKY;

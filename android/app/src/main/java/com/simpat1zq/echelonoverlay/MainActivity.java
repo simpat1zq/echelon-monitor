@@ -42,6 +42,7 @@ public class MainActivity extends Activity {
 
     static final String PREFS = "overlay";
     static final String KEY_URL = "url";
+    static final String KEY_OVERLAY = "overlay_on";
     static final String DEFAULT_URL = "https://echelon.sphome.top";
 
     private WebView web;
@@ -75,6 +76,15 @@ public class MainActivity extends Activity {
                 "window.TreadmillMenu && window.TreadmillMenu.poke && window.TreadmillMenu.poke()", null);
         if (prefs().getBoolean("motion", false) && !MotionService.running && hasCamera()) {
             startForegroundService(new Intent(this, MotionService.class));
+        }
+        // The overlay is on by default; it stays off only if it was turned off.
+        if (prefs().getBoolean(KEY_OVERLAY, true) && !OverlayService.running) {
+            if (Settings.canDrawOverlays(this)) {
+                startOverlay();
+            } else if (!prefs().getBoolean("overlay_asked", false)) {
+                prefs().edit().putBoolean("overlay_asked", true).apply();
+                toggleOverlay();
+            }
         }
     }
 
@@ -148,6 +158,7 @@ public class MainActivity extends Activity {
 
     private boolean toggleOverlay() {
         if (OverlayService.running) {
+            prefs().edit().putBoolean(KEY_OVERLAY, false).apply();
             stopService(new Intent(this, OverlayService.class));
             return false;
         }
@@ -162,6 +173,7 @@ public class MainActivity extends Activity {
     }
 
     private void startOverlay() {
+        prefs().edit().putBoolean(KEY_OVERLAY, true).apply();
         startForegroundService(new Intent(this, OverlayService.class));
         main.postDelayed(this::refreshMenu, 500);
     }
