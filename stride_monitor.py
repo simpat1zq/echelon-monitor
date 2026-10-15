@@ -538,7 +538,6 @@ class StrideBLE:
         self.has_echelon = True
         self.last_echelon_rx = 0.0
         self.last_ftms_rx = 0.0
-        self.last_d3 = 0.0
         self.last_d1 = b""
         self.model = None
         self.challenge = None     # last E0 unlock challenge: {"t": ..., "hex": ...}
@@ -689,9 +688,7 @@ class StrideBLE:
         if self.last_ftms_rx and time.monotonic() - self.last_ftms_rx < 5:
             return  # FTMS data is flowing and is the better source
         w.raw = data.hex(" ")
-        now = time.monotonic()
         if kind == 0xD3 and len(data) >= 5:
-            self.last_d3 = now
             w.speed = ((data[3] << 8) | data[4]) / 1000.0
         elif kind == 0xD2 and len(data) >= 4:
             w.incline = data[3]
@@ -704,9 +701,11 @@ class StrideBLE:
                 w.calories = (data[9] << 8) | data[10]
                 w.set_heart_rate(data[11])
             else:
-                # Stride4-family consoles report speed here (hundredths). Use it
-                # unless the treadmill is also sending 0xD3 speed packets.
-                if len(data) >= 9 and (self.is_stride4 or now - self.last_d3 > 5):
+                # Stride4-family consoles report speed here (hundredths). Only
+                # trust it on those, as QZ does: on the Stride-4s these bytes are
+                # distance, and before its model reply arrives they would read as
+                # a speed that sticks (it only sends 0xD3 when the speed changes).
+                if len(data) >= 9 and self.is_stride4:
                     w.speed = ((data[7] << 8) | data[8]) / 100.0
                 if len(data) > 11:
                     w.set_heart_rate(data[11])
