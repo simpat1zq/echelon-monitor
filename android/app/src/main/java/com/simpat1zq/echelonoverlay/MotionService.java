@@ -24,7 +24,6 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
-import android.util.Range;
 
 import java.nio.ByteBuffer;
 import java.text.DateFormat;
@@ -34,6 +33,9 @@ import java.util.Date;
 /**
  * Watches the front camera at low resolution and wakes the screen when something
  * moves. Frames are compared in memory only; nothing is stored or sent.
+ *
+ * To save battery the camera doesn't stream: every CHECK_EVERY_MS it runs for a
+ * few frames (so exposure can settle), keeps the last one and stops again.
  */
 public class MotionService extends Service {
 
@@ -45,6 +47,7 @@ public class MotionService extends Service {
     private static final String CHANNEL = "motion";
     private static final String ACTION_STOP = "stop";
     private static final long CHECK_EVERY_MS = 4000;
+    private static final int WARMUP_FRAMES = 3;           // frames dropped while exposure settles
     private static final int GRID_W = 32, GRID_H = 24;
     private static final int CELL_DIFF = 14;           // brightness change (0-255) that counts
     private static final float CHANGED_FRACTION = 0.03f; // share of cells that must change
@@ -55,9 +58,12 @@ public class MotionService extends Service {
     private CameraDevice camera;
     private CameraCaptureSession session;
     private ImageReader reader;
+    private CaptureRequest request;
+    private int burstFrames;
+    private final Runnable burst = this::startBurst;
     private PowerManager.WakeLock cpuLock;
     private int[] previous;
-    private long lastCheck, lastWake, lastNote;
+    private long lastWake, lastNote;
 
     @Override
     public void onCreate() {
@@ -133,7 +139,7 @@ public class MotionService extends Service {
                 @Override
                 public void onOpened(CameraDevice cam) {
                     camera = cam;
-                    startCapture(cm, cameraId);
+                    startCapture();
                 }
 
                 @Override
@@ -158,7 +164,7 @@ public class MotionService extends Service {
         }
     }
 
-    private void startCapture(CameraManager cm, String cameraId) {
+    private void startCapture() {
         try {
             camera.createCaptureSession(Collections.singletonList(reader.getSurface()),
                     new CameraCaptureSession.StateCallback() {
@@ -168,9 +174,8 @@ public class MotionService extends Service {
                             try {
                                 CaptureRequest.Builder b = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
                                 b.addTarget(reader.getSurface());
-                                Range<Integer> slow = slowestFps(cm, cameraId);
-                                if (slow != null) b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, slow);
-                                s.setRepeatingRequest(b.build(), null, bg);
+                                request = b.build();
+                                startBurst();
                             } catch (Exception e) {
                                 Log.w(TAG, "Couldn't start capture", e);
                                 retryLater();
@@ -188,19 +193,15 @@ public class MotionService extends Service {
         }
     }
 
-    private static Range<Integer> slowestFps(CameraManager cm, String id) {
+    /** Runs the camera until onImage has a settled frame, then it stops again. */
+    private void startBurst() {
+        if (session == null || request == null) return;
+        burstFrames = 0;
         try {
-            Range<Integer>[] ranges = cm.getCameraCharacteristics(id)
-                    .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
-            Range<Integer> best = null;
-            if (ranges != null) {
-                for (Range<Integer> r : ranges) {
-                    if (best == null || r.getUpper() < best.getUpper()) best = r;
-                }
-            }
-            return best;
+            session.setRepeatingRequest(request, null, bg);
         } catch (Exception e) {
-            return null;
+            Log.w(TAG, "Couldn't start capture", e);
+            retryLater();
         }
     }
 
@@ -210,6 +211,8 @@ public class MotionService extends Service {
     }
 
     private void closeCamera() {
+        bg.removeCallbacks(burst);
+        request = null;
         try {
             if (session != null) session.close();
         } catch (Exception ignored) {
@@ -227,9 +230,14 @@ public class MotionService extends Service {
         Image img = r.acquireLatestImage();
         if (img == null) return;
         try {
-            long now = System.currentTimeMillis();
-            if (now - lastCheck < CHECK_EVERY_MS) return;
-            lastCheck = now;
+            // Frames still in flight after the burst stopped are ignored.
+            if (++burstFrames != WARMUP_FRAMES + 1) return;
+            try {
+                session.stopRepeating();
+            } catch (Exception e) {
+                Log.w(TAG, "Couldn't stop capture", e);
+            }
+            bg.postDelayed(burst, CHECK_EVERY_MS);
             int[] grid = luminanceGrid(img);
             if (previous != null && changed(previous, grid)) motion();
             previous = grid;
