@@ -31,8 +31,11 @@
             android:name=".OverlayService"
             android:exported="false" />
 
+        <!-- "camera" type: Android 11+ only lets a background service use the camera
+             when it is declared as a camera foreground service. -->
         <service
             android:name=".MotionService"
+            android:foregroundServiceType="camera"
             android:exported="false" />
     </application>
 </manifest>

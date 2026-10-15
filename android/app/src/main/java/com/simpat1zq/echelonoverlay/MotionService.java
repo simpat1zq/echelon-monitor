@@ -8,6 +8,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
 import android.graphics.ImageFormat;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
@@ -16,6 +17,7 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.media.Image;
 import android.media.ImageReader;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
@@ -59,7 +61,11 @@ public class MotionService extends Service {
     public void onCreate() {
         super.onCreate();
         running = true;
-        startForeground(2, buildNotification());
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(2, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA);
+        } else {
+            startForeground(2, buildNotification());
+        }
         // Keep the CPU (and so the camera) running while the screen is off.
         PowerManager pm = getSystemService(PowerManager.class);
         cpuLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "echelon:motion-watch");
