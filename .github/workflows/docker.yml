@@ -25,19 +25,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # A push that also changes the Android app is built by the workflow_run
+      # trigger once the new APK is published; building now would put an image
+      # with the old APK on :latest.
+      - name: Wait for the Android build?
+        id: skip
+        if: github.event_name == 'push'
+        run: |
+          if git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" 2>/dev/null \
+              | grep -qE '^(android/|\.github/workflows/android\.yml$)'; then
+            echo "Android app changed; the image is built after the new APK is published."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Include the latest Android overlay APK
+        if: steps.skip.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release download android -p 'echelon-overlay.*' -D web --clobber || echo "No APK published yet"
       - uses: docker/setup-buildx-action@v3
+        if: steps.skip.outputs.skip != 'true'
       - uses: docker/login-action@v3
+        if: steps.skip.outputs.skip != 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: date
+        if: steps.skip.outputs.skip != 'true'
         run: echo "value=$(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
+        if: steps.skip.outputs.skip != 'true'
         with:
           context: .
           push: true
