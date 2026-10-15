@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
         android:label="Treadmill"
@@ -25,6 +29,10 @@
 
         <service
             android:name=".OverlayService"
+            android:exported="false" />
+
+        <service
+            android:name=".MotionService"
             android:exported="false" />
     </application>
 </manifest>

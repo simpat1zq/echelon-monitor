@@ -1,11 +1,13 @@
 package com.simpat1zq.echelonoverlay;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageInstaller;
+import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.net.http.SslError;
@@ -47,6 +49,7 @@ public class MainActivity extends Activity {
     private boolean startAfterPermission = false;
     private String pendingUpdateUrl = null;
     private static final String ACTION_INSTALL_STATUS = "install_status";
+    private static final int REQ_CAMERA = 7;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -66,6 +69,13 @@ public class MainActivity extends Activity {
         setContentView(web);
         hideSystemBars();
         web.loadUrl(serverUrl());
+
+        // Motion seen by the camera also counts as activity for the page's screen timeout.
+        MotionService.onMotion = () -> web.evaluateJavascript(
+                "window.TreadmillMenu && window.TreadmillMenu.poke && window.TreadmillMenu.poke()", null);
+        if (prefs().getBoolean("motion", false) && !MotionService.running && hasCamera()) {
+            startForegroundService(new Intent(this, MotionService.class));
+        }
     }
 
     @Override
@@ -109,7 +119,17 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+        super.onRequestPermissionsResult(code, perms, results);
+        if (code == REQ_CAMERA) {
+            if (hasCamera()) setMotion(true);
+            else toast("Wake on motion needs the camera permission.");
+        }
+    }
+
+    @Override
     protected void onDestroy() {
+        MotionService.onMotion = null;
         web.destroy();
         super.onDestroy();
     }
@@ -150,6 +170,24 @@ public class MainActivity extends Activity {
         web.evaluateJavascript(
                 "window.TreadmillMenu && window.TreadmillMenu.refreshApp && window.TreadmillMenu.refreshApp()",
                 null);
+    }
+
+    // --- wake on motion ---------------------------------------------------
+
+    private boolean hasCamera() {
+        return checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void setMotion(boolean on) {
+        if (on && !hasCamera()) {
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA);
+            return;
+        }
+        prefs().edit().putBoolean("motion", on).apply();
+        Intent i = new Intent(this, MotionService.class);
+        if (on) startForegroundService(i);
+        else stopService(i);
+        main.postDelayed(this::refreshMenu, 500);
     }
 
     // --- app updates ------------------------------------------------------
@@ -300,6 +338,16 @@ public class MainActivity extends Activity {
                 if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             });
+        }
+
+        @JavascriptInterface
+        public boolean motionEnabled() {
+            return MotionService.running;
+        }
+
+        @JavascriptInterface
+        public void setMotionEnabled(boolean on) {
+            main.post(() -> setMotion(on));
         }
 
         @JavascriptInterface

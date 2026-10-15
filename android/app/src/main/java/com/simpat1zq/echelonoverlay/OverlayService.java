@@ -18,6 +18,8 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.text.TextPaint;
 import android.view.GestureDetector;
+import android.view.HapticFeedbackConstants;
+import android.view.ScaleGestureDetector;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -31,6 +33,8 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -66,6 +70,25 @@ public class OverlayService extends Service {
     private String baseUrl;
     private int primary;
 
+    // Size: 1.0 is the original size; long-press-drag or pinch between these limits.
+    private static final float MIN_SCALE = 0.75f, MAX_SCALE = 2.0f;
+    private float scale;
+    private GradientDrawable bg;
+    /** Everything whose size follows the scale: text views with base sizes and paddings. */
+    private final List<Sized> sized = new ArrayList<>();
+
+    private static class Sized {
+        final OutlinedText view;
+        final float sp, strokeDp;
+        float padL, padT, padR, padB;
+
+        Sized(OutlinedText view, float sp, float strokeDp) {
+            this.view = view;
+            this.sp = sp;
+            this.strokeDp = strokeDp;
+        }
+    }
+
     // Latest values from the server.
     private String timeText = "0:00", speedText = "0.0", speedUnit = "mph";
     private String distText = "0.00", distUnit = "mi";
@@ -78,6 +101,7 @@ public class OverlayService extends Service {
         startForeground(1, buildNotification());
         baseUrl = prefs().getString(MainActivity.KEY_URL, MainActivity.DEFAULT_URL);
         primary = prefs().getInt("primary", TIME);
+        scale = clampScale(prefs().getFloat("scale", 1f));
 
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         buildView();
@@ -92,6 +116,7 @@ public class OverlayService extends Service {
         lp.x = prefs().getInt("x", dp(16));
         lp.y = prefs().getInt("y", dp(16));
         wm.addView(box, lp);
+        applyScale();
         render();
 
         poller = Executors.newSingleThreadScheduledExecutor();
@@ -129,32 +154,27 @@ public class OverlayService extends Service {
     private void buildView() {
         box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(12), dp(6), dp(12), dp(8));
-        GradientDrawable bg = new GradientDrawable();
+        bg = new GradientDrawable();
         bg.setColor(0x260F1115);  // ~15% opaque: just enough to show the box's edges
-        bg.setCornerRadius(dp(14));
         box.setBackground(bg);
 
         LinearLayout top = row();
-        primaryValue = text(40, true, 3);
-        primaryUnit = text(12, true, 2);
-        primaryUnit.setPadding(dp(4), 0, 0, dp(6));
+        primaryValue = text(40, 3, 0, 0, 0, 0);
+        primaryUnit = text(12, 2, 4, 0, 0, 6);
         top.addView(primaryValue);
         top.addView(primaryUnit);
         box.addView(top);
 
         LinearLayout bottom = row();
         for (int i = 0; i < 2; i++) {
-            secondaryValue[i] = text(20, true, 2.5f);
-            secondaryValue[i].setPadding(i == 0 ? 0 : dp(14), 0, 0, 0);
-            secondaryUnit[i] = text(10, true, 2);
-            secondaryUnit[i].setPadding(dp(3), 0, 0, dp(3));
+            secondaryValue[i] = text(20, 2.5f, i == 0 ? 0 : 14, 0, 0, 0);
+            secondaryUnit[i] = text(10, 2, 3, 0, 0, 3);
             bottom.addView(secondaryValue[i]);
             bottom.addView(secondaryUnit[i]);
         }
         box.addView(bottom);
 
-        noteTv = text(12, true, 2);
+        noteTv = text(12, 2, 0, 0, 0, 0);
         noteTv.setTextColor(RED);
         noteTv.setVisibility(View.GONE);
         box.addView(noteTv);
@@ -169,13 +189,43 @@ public class OverlayService extends Service {
         return r;
     }
 
-    private OutlinedText text(float sp, boolean bold, float outlineDp) {
-        OutlinedText t = new OutlinedText(this, dp(outlineDp));
-        t.setTextSize(sp);
+    /** A text view whose size, outline and padding (in dp, before scaling) follow the scale. */
+    private OutlinedText text(float sp, float outlineDp, float padL, float padT, float padR, float padB) {
+        OutlinedText t = new OutlinedText(this);
         t.setIncludeFontPadding(false);
-        t.setTypeface(bold ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
         t.setFontFeatureSettings("tnum");  // fixed-width digits so the box doesn't jitter
+        Sized z = new Sized(t, sp, outlineDp);
+        z.padL = padL;
+        z.padT = padT;
+        z.padR = padR;
+        z.padB = padB;
+        sized.add(z);
         return t;
+    }
+
+    private static float clampScale(float s) {
+        return Math.max(MIN_SCALE, Math.min(MAX_SCALE, s));
+    }
+
+    private void applyScale() {
+        box.setPadding(dp(12 * scale), dp(6 * scale), dp(12 * scale), dp(8 * scale));
+        bg.setCornerRadius(dp(14 * scale));
+        for (Sized z : sized) {
+            z.view.setTextSize(z.sp * scale);
+            float stroke = dp(z.strokeDp * scale);
+            z.view.setStroke(stroke);
+            int edge = Math.round(stroke);  // room for the outline at the edges
+            z.view.setPadding(dp(z.padL * scale) + edge, dp(z.padT * scale),
+                    dp(z.padR * scale) + edge, dp(z.padB * scale));
+        }
+    }
+
+    private void setScale(float s) {
+        s = clampScale(s);
+        if (Math.abs(s - scale) < 0.01f) return;
+        scale = s;
+        applyScale();
     }
 
     /** Puts the chosen stat in the big slot and the other two underneath. */
@@ -206,9 +256,24 @@ public class OverlayService extends Service {
         unit.setVisibility(unit.getText().length() == 0 ? View.GONE : View.VISIBLE);
     }
 
-    /** Drag to move, tap to cycle the big stat, double-tap to open the app. */
+    /**
+     * Drag to move, tap to cycle the big stat, double-tap to open the app,
+     * long-press then drag (or pinch) to resize.
+     */
     private class Touch implements View.OnTouchListener {
         private int startX, startY;
+        private boolean resizing;
+        private float resizeFromX, resizeFromY, resizeFromScale;
+
+        private final ScaleGestureDetector pinch = new ScaleGestureDetector(OverlayService.this,
+                new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                    @Override
+                    public boolean onScale(ScaleGestureDetector d) {
+                        setScale(scale * d.getScaleFactor());
+                        return true;
+                    }
+                });
+
         private final GestureDetector gestures = new GestureDetector(OverlayService.this,
                 new GestureDetector.SimpleOnGestureListener() {
                     @Override
@@ -220,10 +285,20 @@ public class OverlayService extends Service {
 
                     @Override
                     public boolean onScroll(MotionEvent down, MotionEvent e, float dx, float dy) {
+                        if (resizing || pinch.isInProgress() || e.getPointerCount() > 1) return true;
                         lp.x = startX + Math.round(e.getRawX() - down.getRawX());
                         lp.y = startY + Math.round(e.getRawY() - down.getRawY());
                         wm.updateViewLayout(box, lp);
                         return true;
+                    }
+
+                    @Override
+                    public void onLongPress(MotionEvent e) {
+                        resizing = true;
+                        resizeFromX = e.getRawX();
+                        resizeFromY = e.getRawY();
+                        resizeFromScale = scale;
+                        box.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
                     }
 
                     @Override
@@ -245,9 +320,17 @@ public class OverlayService extends Service {
 
         @Override
         public boolean onTouch(View v, MotionEvent e) {
+            pinch.onTouchEvent(e);
             gestures.onTouchEvent(e);
-            if (e.getActionMasked() == MotionEvent.ACTION_UP) {
-                prefs().edit().putInt("x", lp.x).putInt("y", lp.y).apply();
+            int action = e.getActionMasked();
+            if (resizing && action == MotionEvent.ACTION_MOVE) {
+                // Right/down grows, left/up shrinks: 200dp of drag = +/-100%.
+                float moved = ((e.getRawX() - resizeFromX) + (e.getRawY() - resizeFromY)) / 2f;
+                setScale(resizeFromScale * (1f + moved / dp(200)));
+            }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                resizing = false;
+                prefs().edit().putInt("x", lp.x).putInt("y", lp.y).putFloat("scale", scale).apply();
             }
             return true;
         }
@@ -255,15 +338,16 @@ public class OverlayService extends Service {
 
     /** TextView that draws a dark outline behind its text so it reads over any video. */
     static class OutlinedText extends TextView {
-        private final float stroke;
+        private float stroke;
         private boolean outlining;
 
-        OutlinedText(Context c, float strokePx) {
+        OutlinedText(Context c) {
             super(c);
-            stroke = strokePx;
-            // Leave room for the outline at the edges.
-            int pad = Math.round(strokePx);
-            setPadding(pad, 0, pad, 0);
+        }
+
+        void setStroke(float px) {
+            stroke = px;
+            invalidate();
         }
 
         @Override

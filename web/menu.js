@@ -63,13 +63,30 @@
       alert("The app is up to date (version 1.0." + mine + ").");
     }
   };
+  // Optional shortcut on the page itself (dashboard header).
+  const headerBtn = document.getElementById("overlayBtn");
+  const motion = el("button", "item");
+  motion.hidden = !(app && app.setMotionEnabled);
   const refreshApp = () => {
     if (!app) return;
-    overlay.textContent = app.overlayRunning() ? "Stop overlay" : "Start overlay";
+    const on = app.overlayRunning();
+    overlay.textContent = on ? "Stop overlay" : "Start overlay";
+    if (headerBtn) {
+      headerBtn.hidden = false;
+      headerBtn.classList.toggle("on", on);
+      headerBtn.textContent = on ? "Overlay on" : "Overlay off";
+    }
+    if (app.motionEnabled) motion.textContent = "Wake on motion: " + (app.motionEnabled() ? "on" : "off");
   };
-  overlay.onclick = () => {
+  const toggleOverlay = () => {
     app.toggleOverlay();
     close();
+    setTimeout(refreshApp, 800);
+  };
+  overlay.onclick = toggleOverlay;
+  if (headerBtn && app) headerBtn.onclick = toggleOverlay;
+  motion.onclick = () => {
+    app.setMotionEnabled(!app.motionEnabled());
     setTimeout(refreshApp, 800);
   };
   server.onclick = () => {
@@ -92,7 +109,7 @@
     lastActive = Date.now();
     updateAwake();
   };
-  drawer.append(overlay, fs, timeoutItem, apk, update, server, link("/debug", "Debug", "muted-link"));
+  drawer.append(overlay, motion, fs, timeoutItem, apk, update, server, link("/debug", "Debug", "muted-link"));
 
   document.body.append(scrim, drawer);
   const open = () => {
@@ -179,5 +196,7 @@
     fetch("/echelon-overlay.apk", { method: "HEAD" }).then((r) => { apk.hidden = !r.ok; }).catch(() => {});
   }
   load();
-  window.TreadmillMenu = { open, close, reload: load, refreshApp };
+  // Called by the app when the camera sees movement: counts as activity.
+  const poke = () => { lastActive = Date.now(); updateAwake(); };
+  window.TreadmillMenu = { open, close, reload: load, refreshApp, poke };
 })();

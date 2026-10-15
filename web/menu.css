@@ -1,7 +1,10 @@
 /* Shared header + slide-out menu. Pages define the colour variables. */
 header.topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 header.topbar .title { flex: 1; min-width: 0; }
-header.topbar h1 { font-size: 18px; margin: 0; font-weight: 600; }
+header.topbar h1 { font-size: 16px; margin: 0; font-weight: 600; }
+.pill { background: transparent; color: var(--muted); border: 1px solid var(--line, #2a2f3a); border-radius: 999px;
+        padding: 6px 14px; font-size: 14px; font-family: inherit; cursor: pointer; flex: none; }
+.pill.on { color: var(--accent); border-color: var(--accent); background: rgba(79, 195, 247, .12); }
 header.topbar .runner { font-size: 13px; color: var(--muted); margin-top: 2px; cursor: pointer; }
 .menu-btn { background: transparent; border: 0; color: var(--text); font-size: 24px; line-height: 1;
             padding: 4px 6px; margin-left: -6px; cursor: pointer; }
