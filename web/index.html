@@ -185,19 +185,6 @@ $("endRun").onclick = async () => {
 };
 window.addEventListener("resize", draw);
 
-// Keep the screen on while the dashboard is open.
-let wakeLock = null;
-async function keepAwake() {
-  try {
-    if ("wakeLock" in navigator && document.visibilityState === "visible" && !wakeLock) {
-      wakeLock = await navigator.wakeLock.request("screen");
-      wakeLock.addEventListener("release", () => (wakeLock = null));
-    }
-  } catch (e) { /* not supported or not allowed */ }
-}
-document.addEventListener("visibilitychange", keepAwake);
-keepAwake();
-
 $("runner").onclick = () => window.TreadmillMenu && window.TreadmillMenu.open();
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

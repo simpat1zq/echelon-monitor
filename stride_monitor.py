@@ -882,6 +882,32 @@ def make_app(workout, ble=None):
         return {"name": name[:60], "weight_kg": num("weight_kg"), "height_cm": num("height_cm"),
                 "age": num("age", int), "sex": sex}
 
+    defaults = {"screen_timeout_min": 15}
+
+    def current_settings():
+        out = dict(defaults)
+        if workout.store:
+            v = workout.store.get_setting("screen_timeout_min")
+            if v:
+                out["screen_timeout_min"] = int(v)
+        return out
+
+    async def settings_get(_request):
+        return web.json_response(current_settings())
+
+    async def settings_set(request):
+        store = need_store()
+        data = await request.json()
+        if "screen_timeout_min" in data:
+            try:
+                minutes = int(data["screen_timeout_min"])
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text="screen_timeout_min must be a whole number.")
+            if not 1 <= minutes <= 1440:
+                raise web.HTTPBadRequest(text="screen_timeout_min must be between 1 and 1440.")
+            store.set_setting("screen_timeout_min", str(minutes))
+        return web.json_response(current_settings())
+
     async def users_api(_request):
         if not workout.store:
             return web.json_response({"history": False, "users": [], "active_id": None})
@@ -1008,6 +1034,8 @@ def make_app(workout, ble=None):
     app.router.add_get("/api/runs", runs_api)
     app.router.add_get("/api/runs/{run_id:\\d+}/samples", run_samples)
     app.router.add_delete("/api/runs/{run_id:\\d+}", run_delete)
+    app.router.add_get("/api/settings", settings_get)
+    app.router.add_post("/api/settings", settings_set)
     app.router.add_get("/api/users", users_api)
     app.router.add_post("/api/users", user_create)
     app.router.add_put("/api/users/{user_id:\\d+}", user_update)

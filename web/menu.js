@@ -56,7 +56,21 @@
   };
   if (app) fs.hidden = true;  // the app is already full screen
   refreshApp();
-  drawer.append(overlay, fs, apk, server, link("/debug", "Debug", "muted-link"));
+  const timeoutItem = el("button", "item");
+  timeoutItem.onclick = async () => {
+    const v = prompt("Let the screen turn off after how many minutes with the treadmill stopped?",
+      String(screenTimeoutMin));
+    if (v == null) return;
+    const r = await fetch("/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ screen_timeout_min: Number(v) }),
+    });
+    if (!r.ok) { alert(await r.text()); return; }
+    applySettings(await r.json());
+    lastActive = Date.now();
+    updateAwake();
+  };
+  drawer.append(overlay, fs, timeoutItem, apk, server, link("/debug", "Debug", "muted-link"));
 
   document.body.append(scrim, drawer);
   const open = () => {
@@ -95,6 +109,49 @@
     }
     if (!data.users.length) users.append(el("div", "item sub", "No users yet. Add one below."));
   }
+
+  // --- Keep the screen on while the treadmill is in use ---------------
+  // Awake while the belt moves and for `screen_timeout_min` after it stops
+  // (or after the page opens); then the device's own screen timeout applies.
+  let screenTimeoutMin = 15, lastActive = Date.now(), wakeLock = null, awake = null;
+
+  function applySettings(s) {
+    screenTimeoutMin = s.screen_timeout_min || 15;
+    timeoutItem.textContent = "Screen timeout: " + screenTimeoutMin + " min";
+  }
+  applySettings({});
+
+  async function setAwake(on) {
+    if (on === awake && (!on || app || wakeLock)) return;
+    awake = on;
+    if (app && app.setKeepScreenOn) { app.setKeepScreenOn(on); return; }
+    try {
+      if (on && !wakeLock && "wakeLock" in navigator && document.visibilityState === "visible") {
+        wakeLock = await navigator.wakeLock.request("screen");
+        wakeLock.addEventListener("release", () => { wakeLock = null; });
+      } else if (!on && wakeLock) {
+        await wakeLock.release();
+        wakeLock = null;
+      }
+    } catch (e) { /* wake lock not supported or not allowed */ }
+  }
+
+  function updateAwake() {
+    setAwake(Date.now() - lastActive < screenTimeoutMin * 60000);
+  }
+
+  async function pollActivity() {
+    try {
+      const st = await (await fetch("/api/state")).json();
+      if (st.speed > 0) lastActive = Date.now();
+    } catch (e) { /* server unreachable: just let the timeout run */ }
+    updateAwake();
+  }
+
+  fetch("/api/settings").then((r) => r.json()).then(applySettings).catch(() => {});
+  document.addEventListener("visibilitychange", () => { awake = null; updateAwake(); });
+  pollActivity();
+  setInterval(pollActivity, 10000);
 
   if (!app) {
     fetch("/echelon-overlay.apk", { method: "HEAD" }).then((r) => { apk.hidden = !r.ok; }).catch(() => {});

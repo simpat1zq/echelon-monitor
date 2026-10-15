@@ -206,6 +206,15 @@ public class MainActivity extends Activity {
             main.post(MainActivity.this::toggleOverlay);
         }
 
+        /** The page decides: on while the treadmill is in use, off after its timeout. */
+        @JavascriptInterface
+        public void setKeepScreenOn(boolean on) {
+            main.post(() -> {
+                if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            });
+        }
+
         @JavascriptInterface
         public String serverUrl() {
             return MainActivity.this.serverUrl();
