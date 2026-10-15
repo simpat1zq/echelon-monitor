@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY stride_monitor.py index.html runs.html ./
+COPY stride_monitor.py index.html runs.html debug.html ./
 
 ARG APP_VERSION=dev
 ARG APP_BUILD_DATE=

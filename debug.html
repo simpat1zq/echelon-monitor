@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Treadmill Debug</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #1a1d24; --text: #f2f4f8; --muted: #8b93a3;
+    --accent: #4fc3f7; --line: #2a2f3a; --warn: #ffb74d; --ok: #66bb6a; --bad: #ef5350;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 12px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 20px 0 8px; font-weight: 600; }
+  nav a { color: var(--accent); text-decoration: none; font-size: 15px; margin-left: 14px; }
+  .status { font-size: 14px; color: var(--muted); margin-bottom: 8px; }
+  .status b { color: var(--text); }
+  .intro { font-size: 14px; color: var(--muted); line-height: 1.45; margin: 0 0 4px; }
+  .cmd { background: var(--card); border-radius: 12px; padding: 12px 14px; margin-bottom: 8px;
+         display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .cmd.danger { border-left: 3px solid var(--warn); }
+  .cmd .name { font-weight: 600; }
+  .cmd .note { font-size: 13px; color: var(--muted); margin-top: 3px; }
+  .cmd code { font-size: 12px; color: var(--muted); }
+  button { background: #22324a; color: var(--text); border: 1px solid #2f4a6a; border-radius: 8px;
+           padding: 8px 14px; font-size: 14px; white-space: nowrap; }
+  button:disabled { opacity: .4; }
+  .danger button { background: #3a2a14; border-color: #6a4a1f; }
+  .log { background: var(--card); border-radius: 12px; padding: 10px 12px; font-family: ui-monospace, Menlo, Consolas, monospace;
+         font-size: 12px; line-height: 1.6; max-height: 50vh; overflow: auto; }
+  .log .tx { color: var(--accent); }
+  .log .rx { color: var(--ok); }
+  .log .t { color: var(--muted); }
+  .toast { position: fixed; left: 16px; right: 16px; bottom: 16px; background: #2a2f3a; padding: 10px 14px; border-radius: 10px; font-size: 14px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Debug</h1>
+  <nav><a href="/">Live</a><a href="/runs">Runs</a></nav>
+</header>
+<div class="status" id="status">Loading…</div>
+<p class="intro">Each button sends one command the Echelon app uses. Watch the console after each one,
+  and note which (if any) makes the blank fields show numbers. Orange ones can start or stop the belt:
+  only use them with the safety key clipped on, or stand off the belt.</p>
+
+<h2>Commands</h2>
+<div id="cmds"></div>
+
+<h2>Recent traffic <span style="text-transform:none;letter-spacing:0">(newest first; keepalives hidden)</span></h2>
+<div class="log" id="log"></div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let built = false, connected = false;
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => (t.hidden = true), 3000);
+}
+
+function buildCommands(cmds) {
+  const box = $("cmds");
+  for (const c of cmds) {
+    const row = document.createElement("div");
+    row.className = "cmd" + (c.danger ? " danger" : "");
+    const info = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "name"; name.textContent = c.label;
+    const note = document.createElement("div");
+    note.className = "note"; note.textContent = c.note + " ";
+    const code = document.createElement("code");
+    code.textContent = c.hex.match(/../g).join(" ");
+    note.append(code);
+    info.append(name, note);
+    const btn = document.createElement("button");
+    btn.textContent = "Send";
+    btn.dataset.cmd = c.id;
+    btn.onclick = async () => {
+      if (c.danger && !confirm(c.label + "\n\n" + c.note + "\n\nSend it?")) return;
+      btn.disabled = true;
+      try {
+        const r = await fetch("/api/debug/" + c.id, { method: "POST" });
+        const d = await r.json();
+        toast(d.ok ? "Sent " + c.label : "Failed: " + d.error);
+      } catch (e) {
+        toast("Failed: " + e);
+      } finally {
+        btn.disabled = false;
+        refresh();
+      }
+    };
+    row.append(info, btn);
+    box.append(row);
+  }
+}
+
+function renderLog(packets) {
+  const log = $("log");
+  log.textContent = "";
+  if (!packets.length) { log.textContent = "Nothing yet."; return; }
+  for (const p of packets.slice().reverse()) {
+    const line = document.createElement("div");
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = new Date(p.t * 1000).toLocaleTimeString() + "  ";
+    const d = document.createElement("span");
+    d.className = p.dir.toLowerCase();
+    d.textContent = p.dir + "  " + p.hex;
+    line.append(t, d);
+    log.append(line);
+  }
+}
+
+async function refresh() {
+  try {
+    const d = await (await fetch("/api/debug")).json();
+    if (!built) { buildCommands(d.commands); built = true; }
+    connected = d.connected;
+    $("status").innerHTML = "";
+    const s = $("status");
+    s.append("Treadmill: ");
+    const b = document.createElement("b");
+    b.textContent = d.connected ? "connected" : "not connected";
+    s.append(b);
+    if (d.model) s.append(" · model " + d.model);
+    document.querySelectorAll("#cmds button").forEach((btn) => (btn.disabled = !d.connected));
+    renderLog(d.packets);
+  } catch (e) {
+    $("status").textContent = "Server offline – retrying…";
+  }
+}
+
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

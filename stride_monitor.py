@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import asyncio
+import collections
 import csv
 import json
 import logging
@@ -47,6 +48,30 @@ INIT_GENERIC = [
     "f0a30093",
     "f0a10091",
 ]
+# Commands the debug page can send. All are taken from the Echelon Fit app
+# (mostly its wired/serial console path, which the built-in tablet uses).
+DEBUG_COMMANDS = [
+    {"id": "start", "hex": "f0b00101a2", "label": "Start workout (B0 01)",
+     "note": "What the app sends when a workout starts. On this treadmill it may start "
+             "the belt (possibly after a countdown).", "danger": True},
+    {"id": "stop", "hex": "f0b00100a1", "label": "Stop workout (B0 00)",
+     "note": "What the app sends (twice) when a workout ends. Stops the belt.", "danger": True},
+    {"id": "b3", "hex": "f0b30100a4", "label": "End-of-workout B3 00",
+     "note": "Sent by the app's treadmill controller when a workout ends.", "danger": False},
+    {"id": "b5", "hex": "f0b50101a7", "label": "B5 01",
+     "note": "Sent after the console's pairing/confirm step.", "danger": False},
+    {"id": "units_imp", "hex": "f0b40100a5", "label": "Units B4 00",
+     "note": "Unit setting the app sends on connect (0/1 = imperial/metric, order unknown).",
+     "danger": False},
+    {"id": "units_met", "hex": "f0b40101a6", "label": "Units B4 01",
+     "note": "The other unit setting. Send B4 00 to switch back if the console changes units.",
+     "danger": False},
+    {"id": "c72", "hex": "f072010164", "label": "72 01",
+     "note": "Sent by the app on the wired console link; purpose unknown.", "danger": False},
+    {"id": "c73", "hex": "f0730063", "label": "Query 73",
+     "note": "Read-only query (returns a text string, likely a serial number).", "danger": False},
+]
+
 # Model code reported in the 0xA1 reply; the Stride-4s reports 0x20.
 MODEL_STRIDE_4S = 0x20
 # Read-only queries the Echelon app sends after the basic init on this model.
@@ -318,6 +343,7 @@ class StrideBLE:
         self.last_d3 = 0.0
         self.last_d1 = b""
         self.model = None
+        self.packet_log = collections.deque(maxlen=150)
 
     async def find_device(self):
         from bleak import BleakScanner
@@ -360,7 +386,23 @@ class StrideBLE:
         data = bytes.fromhex(hexstr_or_bytes) if isinstance(hexstr_or_bytes, str) else bytes(hexstr_or_bytes)
         if self.debug:
             log.debug("TX %s", data.hex(" "))
+        self._log_packet("TX", data)
         await self.client.write_gatt_char(WRITE_UUID, data, response=self.write_response)
+
+    def _log_packet(self, direction, data):
+        """Keep recent traffic for the debug page, skipping the keepalive chatter."""
+        data = bytes(data)
+        if len(data) >= 2 and data[1] == 0xA0:
+            return
+        if direction == "RX" and len(data) >= 2 and data[1] == 0xD1 and data == self.last_d1:
+            return
+        self.packet_log.append({"t": time.time(), "dir": direction, "hex": data.hex(" ")})
+
+    async def send_debug(self, hexstr):
+        if self.client is None or not self.client.is_connected or not self.workout.connected:
+            raise RuntimeError("treadmill not connected")
+        log.info("Debug command: %s", hexstr)
+        await self.write(hexstr)
 
     def log_gatt(self, client):
         log.info("GATT services offered by the treadmill:")
@@ -371,6 +413,7 @@ class StrideBLE:
 
     def on_other_notify(self, char, data: bytearray):
         log.info("RX(other %s) %s", char.uuid[4:8], data.hex(" "))
+        self._log_packet("RX", data)
 
     def on_ftms(self, _char, data: bytearray):
         """Standard Bluetooth FTMS Treadmill Data (0x2ACD)."""
@@ -396,6 +439,7 @@ class StrideBLE:
         w = self.workout
         if self.debug:
             log.debug("RX %s", data.hex(" "))
+        self._log_packet("RX", data)
         self.last_echelon_rx = time.monotonic()
         if self.last_ftms_rx and time.monotonic() - self.last_ftms_rx < 5:
             return  # FTMS data is flowing and is the better source
@@ -674,8 +718,31 @@ async def csv_logger(workout, path):
                 fh.flush()
 
 
-def make_app(workout):
+def make_app(workout, ble=None):
     clients = set()
+
+    async def debug_page(_request):
+        return web.FileResponse(os.path.join(HERE, "debug.html"))
+
+    async def debug_state(_request):
+        return web.json_response({
+            "connected": workout.connected,
+            "model": None if ble is None or ble.model is None else f"0x{ble.model:02x}",
+            "commands": DEBUG_COMMANDS,
+            "packets": list(ble.packet_log) if ble else [],
+        })
+
+    async def debug_send(request):
+        cmd = next((c for c in DEBUG_COMMANDS if c["id"] == request.match_info["cmd"]), None)
+        if cmd is None:
+            raise web.HTTPNotFound()
+        if ble is None:
+            return web.json_response({"ok": False, "error": "no treadmill in demo mode"}, status=409)
+        try:
+            await ble.send_debug(cmd["hex"])
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(exc)}, status=409)
+        return web.json_response({"ok": True})
 
     async def index(_request):
         return web.FileResponse(os.path.join(HERE, "index.html"))
@@ -744,6 +811,9 @@ def make_app(workout):
     app.router.add_get("/", index)
     app.router.add_get("/api/state", state)
     app.router.add_post("/api/end", end_run)
+    app.router.add_get("/debug", debug_page)
+    app.router.add_get("/api/debug", debug_state)
+    app.router.add_post("/api/debug/{cmd}", debug_send)
     app.router.add_get("/runs", runs_page)
     app.router.add_get("/api/runs", runs_api)
     app.router.add_get("/api/runs/{run_id:\\d+}/samples", run_samples)
@@ -769,7 +839,11 @@ async def main_async(args):
         store = RunStore(args.db)
         log.info("Saving runs to %s", args.db)
     workout = Workout(metric=args.metric, store=store, idle_timeout=args.idle_timeout)
-    runner = web.AppRunner(make_app(workout))
+    ble = None
+    if not args.demo:
+        ble = StrideBLE(workout, args.address, args.name, args.debug, args.protocol,
+                        args.disconnect_on_exit)
+    runner = web.AppRunner(make_app(workout, ble))
     await runner.setup()
     await web.TCPSite(runner, args.host, args.port).start()
     log.info("Echelon Monitor version %s%s", APP_VERSION[:7],
@@ -780,8 +854,6 @@ async def main_async(args):
     if args.demo:
         tasks.append(asyncio.create_task(demo_loop(workout)))
     else:
-        ble = StrideBLE(workout, args.address, args.name, args.debug, args.protocol,
-                        args.disconnect_on_exit)
         tasks.append(asyncio.create_task(ble.run_forever()))
     if args.csv:
         tasks.append(asyncio.create_task(csv_logger(workout, args.csv)))
