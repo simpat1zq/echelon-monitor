@@ -27,7 +27,9 @@ import android.util.Log;
 import android.util.Range;
 
 import java.nio.ByteBuffer;
+import java.text.DateFormat;
 import java.util.Collections;
+import java.util.Date;
 
 /**
  * Watches the front camera at low resolution and wakes the screen when something
@@ -55,16 +57,16 @@ public class MotionService extends Service {
     private ImageReader reader;
     private PowerManager.WakeLock cpuLock;
     private int[] previous;
-    private long lastCheck;
+    private long lastCheck, lastWake, lastNote;
 
     @Override
     public void onCreate() {
         super.onCreate();
         running = true;
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(2, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA);
+            startForeground(2, buildNotification(null), ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA);
         } else {
-            startForeground(2, buildNotification());
+            startForeground(2, buildNotification(null));
         }
         // Keep the CPU (and so the camera) running while the screen is off.
         PowerManager pm = getSystemService(PowerManager.class);
@@ -262,13 +264,30 @@ public class MotionService extends Service {
         return n > a.length * CHANGED_FRACTION;
     }
 
-    @SuppressWarnings("deprecation")  // the full wake lock is still the way to turn the screen on from a service
+    @SuppressWarnings("deprecation")  // SCREEN_BRIGHT_WAKE_LOCK is a fallback for older Android
     private void motion() {
+        long now = System.currentTimeMillis();
         PowerManager pm = getSystemService(PowerManager.class);
-        if (!pm.isInteractive()) {
+        if (!pm.isInteractive() && now - lastWake > 5000) {
+            lastWake = now;
             PowerManager.WakeLock wake = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK
                     | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE, "echelon:motion-wake");
             wake.acquire(3000);
+            // Newer Android ignores the wake lock above; an activity that asks to turn
+            // the screen on works (allowed from the background because the app can
+            // draw over other apps).
+            try {
+                startActivity(new Intent(this, WakeActivity.class)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION));
+            } catch (Exception e) {
+                Log.w(TAG, "Couldn't start wake screen", e);
+            }
+        }
+        // Show the last detection in the notification, to tell detection from waking.
+        if (now - lastNote > 5000) {
+            lastNote = now;
+            String when = DateFormat.getTimeInstance(DateFormat.MEDIUM).format(new Date(now));
+            getSystemService(NotificationManager.class).notify(2, buildNotification("Motion seen at " + when));
         }
         Runnable listener = onMotion;
         if (listener != null) main.post(listener);
@@ -276,7 +295,7 @@ public class MotionService extends Service {
 
     // --- plumbing ---------------------------------------------------------
 
-    private Notification buildNotification() {
+    private Notification buildNotification(String status) {
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(new NotificationChannel(
                 CHANNEL, "Wake on motion", NotificationManager.IMPORTANCE_LOW));
@@ -288,7 +307,8 @@ public class MotionService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL)
                 .setContentTitle("Wake on motion is on")
-                .setContentText("The front camera watches for movement to turn the screen on")
+                .setContentText(status != null ? status
+                        : "The front camera watches for movement to turn the screen on")
                 .setSmallIcon(android.R.drawable.ic_menu_camera)
                 .setContentIntent(open)
                 .addAction(new Notification.Action.Builder(null, "Turn off", stop).build())

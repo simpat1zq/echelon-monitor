@@ -180,8 +180,16 @@ public class MainActivity extends Activity {
 
     private void setMotion(boolean on) {
         if (on && !hasCamera()) {
-            requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA);
+            // Android 13+ also needs permission to show the service's notification.
+            String[] perms = Build.VERSION.SDK_INT >= 33
+                    ? new String[]{Manifest.permission.CAMERA, Manifest.permission.POST_NOTIFICATIONS}
+                    : new String[]{Manifest.permission.CAMERA};
+            requestPermissions(perms, REQ_CAMERA);
             return;
+        }
+        if (on && Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 0);
         }
         prefs().edit().putBoolean("motion", on).apply();
         Intent i = new Intent(this, MotionService.class);
