@@ -5,14 +5,19 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.text.TextPaint;
+import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -31,7 +36,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-/** Floating, draggable box showing live treadmill stats from the server's /api/state. */
+/**
+ * Floating, draggable box showing live treadmill stats from the server's /api/state.
+ * Tap to change which stat is shown large; double-tap to open the app.
+ */
 public class OverlayService extends Service {
 
     static volatile boolean running = false;
@@ -40,16 +48,28 @@ public class OverlayService extends Service {
     private static final String ACTION_STOP = "stop";
     private static final int BLUE = 0xFF4FC3F7;
     private static final int WHITE = 0xFFF2F4F8;
-    private static final int MUTED = 0xFF8B93A3;
-    private static final int RED = 0xFFEF5350;
+    private static final int MUTED = 0xFFB8C0CC;
+    private static final int RED = 0xFFFF6B6B;
+    private static final int OUTLINE = 0xFF000000;
+
+    // The stats, in the order a tap cycles through them. Time is the default primary.
+    private static final int TIME = 0, SPEED = 1, DISTANCE = 2;
 
     private WindowManager wm;
     private WindowManager.LayoutParams lp;
     private LinearLayout box;
-    private TextView speedTv, speedUnitTv, timeTv, distTv, distUnitTv, noteTv;
+    private OutlinedText primaryValue, primaryUnit, noteTv;
+    private final OutlinedText[] secondaryValue = new OutlinedText[2];
+    private final OutlinedText[] secondaryUnit = new OutlinedText[2];
     private final Handler main = new Handler(Looper.getMainLooper());
     private ScheduledExecutorService poller;
     private String baseUrl;
+    private int primary;
+
+    // Latest values from the server.
+    private String timeText = "0:00", speedText = "0.0", speedUnit = "mph";
+    private String distText = "0.00", distUnit = "mi";
+    private boolean connected = false;
 
     @Override
     public void onCreate() {
@@ -57,6 +77,7 @@ public class OverlayService extends Service {
         running = true;
         startForeground(1, buildNotification());
         baseUrl = prefs().getString(MainActivity.KEY_URL, MainActivity.DEFAULT_URL);
+        primary = prefs().getInt("primary", TIME);
 
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         buildView();
@@ -71,6 +92,7 @@ public class OverlayService extends Service {
         lp.x = prefs().getInt("x", dp(16));
         lp.y = prefs().getInt("y", dp(16));
         wm.addView(box, lp);
+        render();
 
         poller = Executors.newSingleThreadScheduledExecutor();
         poller.scheduleWithFixedDelay(this::poll, 0, 1, TimeUnit.SECONDS);
@@ -107,39 +129,37 @@ public class OverlayService extends Service {
     private void buildView() {
         box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(14), dp(8), dp(14), dp(10));
+        box.setPadding(dp(12), dp(6), dp(12), dp(8));
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xD90F1115);
+        bg.setColor(0x260F1115);  // ~15% opaque: just enough to show the box's edges
         bg.setCornerRadius(dp(14));
         box.setBackground(bg);
 
-        LinearLayout speedRow = row();
-        speedTv = text(40, BLUE, true);
-        speedUnitTv = text(14, MUTED, false);
-        speedUnitTv.setPadding(dp(4), 0, 0, dp(6));
-        speedRow.addView(speedTv);
-        speedRow.addView(speedUnitTv);
-        box.addView(speedRow);
+        LinearLayout top = row();
+        primaryValue = text(40, true, 3);
+        primaryUnit = text(12, true, 2);
+        primaryUnit.setPadding(dp(4), 0, 0, dp(6));
+        top.addView(primaryValue);
+        top.addView(primaryUnit);
+        box.addView(top);
 
-        LinearLayout statsRow = row();
-        timeTv = text(22, WHITE, true);
-        distTv = text(22, WHITE, true);
-        distTv.setPadding(dp(16), 0, 0, 0);
-        distUnitTv = text(13, MUTED, false);
-        distUnitTv.setPadding(dp(3), 0, 0, dp(3));
-        statsRow.addView(timeTv);
-        statsRow.addView(distTv);
-        statsRow.addView(distUnitTv);
-        box.addView(statsRow);
+        LinearLayout bottom = row();
+        for (int i = 0; i < 2; i++) {
+            secondaryValue[i] = text(20, true, 2.5f);
+            secondaryValue[i].setPadding(i == 0 ? 0 : dp(14), 0, 0, 0);
+            secondaryUnit[i] = text(10, true, 2);
+            secondaryUnit[i].setPadding(dp(3), 0, 0, dp(3));
+            bottom.addView(secondaryValue[i]);
+            bottom.addView(secondaryUnit[i]);
+        }
+        box.addView(bottom);
 
-        noteTv = text(12, RED, false);
+        noteTv = text(12, true, 2);
+        noteTv.setTextColor(RED);
         noteTv.setVisibility(View.GONE);
         box.addView(noteTv);
 
-        speedTv.setText("–");
-        timeTv.setText("0:00");
-        distTv.setText("0.00");
-        box.setOnTouchListener(new DragListener());
+        box.setOnTouchListener(new Touch());
     }
 
     private LinearLayout row() {
@@ -149,39 +169,124 @@ public class OverlayService extends Service {
         return r;
     }
 
-    private TextView text(float sp, int color, boolean bold) {
-        TextView t = new TextView(this);
+    private OutlinedText text(float sp, boolean bold, float outlineDp) {
+        OutlinedText t = new OutlinedText(this, dp(outlineDp));
         t.setTextSize(sp);
-        t.setTextColor(color);
         t.setIncludeFontPadding(false);
-        if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setTypeface(bold ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        t.setFontFeatureSettings("tnum");  // fixed-width digits so the box doesn't jitter
         return t;
     }
 
-    private class DragListener implements View.OnTouchListener {
+    /** Puts the chosen stat in the big slot and the other two underneath. */
+    private void render() {
+        int[] order = {primary, (primary + 1) % 3, (primary + 2) % 3};
+        setStat(primaryValue, primaryUnit, order[0], true);
+        for (int i = 0; i < 2; i++) setStat(secondaryValue[i], secondaryUnit[i], order[i + 1], false);
+    }
+
+    private void setStat(TextView value, TextView unit, int which, boolean big) {
+        switch (which) {
+            case TIME:
+                value.setText(timeText);
+                unit.setText("");
+                value.setTextColor(WHITE);
+                break;
+            case SPEED:
+                value.setText(speedText);
+                unit.setText(speedUnit);
+                value.setTextColor(big && connected ? BLUE : WHITE);
+                break;
+            default:
+                value.setText(distText);
+                unit.setText(distUnit);
+                value.setTextColor(WHITE);
+                break;
+        }
+        unit.setTextColor(MUTED);
+        unit.setVisibility(unit.getText().length() == 0 ? View.GONE : View.VISIBLE);
+    }
+
+    /** Drag to move, tap to cycle the big stat, double-tap to open the app. */
+    private class Touch implements View.OnTouchListener {
         private int startX, startY;
-        private float touchX, touchY;
+        private final GestureDetector gestures = new GestureDetector(OverlayService.this,
+                new GestureDetector.SimpleOnGestureListener() {
+                    @Override
+                    public boolean onDown(MotionEvent e) {
+                        startX = lp.x;
+                        startY = lp.y;
+                        return true;
+                    }
+
+                    @Override
+                    public boolean onScroll(MotionEvent down, MotionEvent e, float dx, float dy) {
+                        lp.x = startX + Math.round(e.getRawX() - down.getRawX());
+                        lp.y = startY + Math.round(e.getRawY() - down.getRawY());
+                        wm.updateViewLayout(box, lp);
+                        return true;
+                    }
+
+                    @Override
+                    public boolean onSingleTapConfirmed(MotionEvent e) {
+                        primary = (primary + 1) % 3;
+                        prefs().edit().putInt("primary", primary).apply();
+                        render();
+                        return true;
+                    }
+
+                    @Override
+                    public boolean onDoubleTap(MotionEvent e) {
+                        startActivity(new Intent(OverlayService.this, MainActivity.class)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                        | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                        return true;
+                    }
+                });
 
         @Override
         public boolean onTouch(View v, MotionEvent e) {
-            switch (e.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    startX = lp.x;
-                    startY = lp.y;
-                    touchX = e.getRawX();
-                    touchY = e.getRawY();
-                    return true;
-                case MotionEvent.ACTION_MOVE:
-                    lp.x = startX + Math.round(e.getRawX() - touchX);
-                    lp.y = startY + Math.round(e.getRawY() - touchY);
-                    wm.updateViewLayout(box, lp);
-                    return true;
-                case MotionEvent.ACTION_UP:
-                    prefs().edit().putInt("x", lp.x).putInt("y", lp.y).apply();
-                    return true;
-                default:
-                    return false;
+            gestures.onTouchEvent(e);
+            if (e.getActionMasked() == MotionEvent.ACTION_UP) {
+                prefs().edit().putInt("x", lp.x).putInt("y", lp.y).apply();
             }
+            return true;
+        }
+    }
+
+    /** TextView that draws a dark outline behind its text so it reads over any video. */
+    static class OutlinedText extends TextView {
+        private final float stroke;
+        private boolean outlining;
+
+        OutlinedText(Context c, float strokePx) {
+            super(c);
+            stroke = strokePx;
+            // Leave room for the outline at the edges.
+            int pad = Math.round(strokePx);
+            setPadding(pad, 0, pad, 0);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            TextPaint p = getPaint();
+            int fill = getCurrentTextColor();
+            outlining = true;
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeJoin(Paint.Join.ROUND);
+            p.setStrokeWidth(stroke);
+            setTextColor(OUTLINE);
+            super.onDraw(canvas);
+            p.setStyle(Paint.Style.FILL);
+            setTextColor(fill);
+            outlining = false;
+            super.onDraw(canvas);
+        }
+
+        @Override
+        public void invalidate() {
+            // setTextColor() in onDraw() would otherwise redraw forever.
+            if (!outlining) super.invalidate();
         }
     }
 
@@ -202,30 +307,28 @@ public class OverlayService extends Service {
             JSONObject d = new JSONObject(sb.toString());
             main.post(() -> show(d));
         } catch (Exception ex) {
-            main.post(() -> showError("server unreachable"));
+            main.post(() -> showNote("server unreachable"));
         }
     }
 
     private void show(JSONObject d) {
-        boolean connected = d.optBoolean("connected", false);
-        speedTv.setText(String.format(Locale.US, "%.1f", d.optDouble("speed", 0)));
-        speedTv.setTextColor(connected ? BLUE : MUTED);
-        speedUnitTv.setText(d.optString("speed_unit", "mph"));
-        timeTv.setText(formatTime(d.optInt("moving_seconds", 0)));
-        distTv.setText(String.format(Locale.US, "%.2f", d.optDouble("distance", 0)));
-        distUnitTv.setText(d.optString("distance_unit", "mi"));
-        if (connected) {
-            noteTv.setVisibility(View.GONE);
-        } else {
-            noteTv.setText("treadmill not connected");
-            noteTv.setVisibility(View.VISIBLE);
-        }
+        connected = d.optBoolean("connected", false);
+        speedText = String.format(Locale.US, "%.1f", d.optDouble("speed", 0));
+        speedUnit = d.optString("speed_unit", "mph");
+        timeText = formatTime(d.optInt("moving_seconds", 0));
+        distText = String.format(Locale.US, "%.2f", d.optDouble("distance", 0));
+        distUnit = d.optString("distance_unit", "mi");
+        render();
+        showNote(connected ? null : "treadmill not connected");
     }
 
-    private void showError(String msg) {
-        speedTv.setTextColor(MUTED);
-        noteTv.setText(msg);
-        noteTv.setVisibility(View.VISIBLE);
+    private void showNote(String msg) {
+        if (msg == null) {
+            noteTv.setVisibility(View.GONE);
+        } else {
+            noteTv.setText(msg);
+            noteTv.setVisibility(View.VISIBLE);
+        }
     }
 
     private static String formatTime(int s) {
@@ -260,7 +363,7 @@ public class OverlayService extends Service {
         return getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE);
     }
 
-    private int dp(int v) {
+    private int dp(float v) {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 }

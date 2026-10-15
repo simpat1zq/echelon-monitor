@@ -42,8 +42,9 @@ public class MainActivity extends Activity {
         col.addView(title);
 
         TextView help = new TextView(this);
-        help.setText("Shows speed, time and distance in a small box on top of other apps, "
-                + "like Jellyfin. Drag the box to move it.");
+        help.setText("Shows time, speed and distance in a small box on top of other apps, "
+                + "like Jellyfin. Drag the box to move it, tap it to switch which number is "
+                + "big, and double-tap it to come back here.");
         help.setPadding(0, dp(8), 0, dp(16));
         col.addView(help);
 
