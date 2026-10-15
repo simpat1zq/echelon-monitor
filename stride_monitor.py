@@ -71,6 +71,12 @@ DEBUG_COMMANDS = [
      "danger": False},
     {"id": "c72", "hex": "f072010164", "label": "72 01",
      "note": "Sent by the app on the wired console link; purpose unknown.", "danger": False},
+    {"id": "a4", "hex": "f0a40094", "label": "A4 (asks for the unlock challenge)",
+     "note": "QZ sends this and waits for the treadmill's E0 unlock challenge. If one arrives, "
+             "it shows at the top of this page.", "danger": False},
+    {"id": "qz_unlock", "hex": "f0e0fd3e6548d58d", "label": "QZ's fixed unlock answer (E0)",
+     "note": "The answer QZ hard-codes for the challenge 72 85 18 58 61. Only helps if your "
+             "treadmill sends that same challenge.", "danger": False},
     {"id": "c73", "hex": "f0730063", "label": "Query 73",
      "note": "Read-only query (returns a text string, likely a serial number).", "danger": False},
 ]
@@ -535,6 +541,7 @@ class StrideBLE:
         self.last_d3 = 0.0
         self.last_d1 = b""
         self.model = None
+        self.challenge = None     # last E0 unlock challenge: {"t": ..., "hex": ...}
         self.packet_log = collections.deque(maxlen=150)
 
     async def find_device(self):
@@ -659,26 +666,36 @@ class StrideBLE:
             log.debug("RX %s", data.hex(" "))
         self._log_packet("RX", data)
         self.last_echelon_rx = time.monotonic()
-        if self.last_ftms_rx and time.monotonic() - self.last_ftms_rx < 5:
-            return  # FTMS data is flowing and is the better source
-        w.raw = data.hex(" ")
         if len(data) < 2:
             return
         kind = data[1]
+        if kind == 0xE0:
+            # The Echelon app answers this with a key from Echelon's servers; until
+            # then the treadmill seems to ignore control commands.
+            self.challenge = {"t": time.time(), "hex": data.hex(" ")}
+            log.info("Treadmill sent an unlock challenge: %s", data.hex(" "))
+            return
+        if kind == 0xA1 and len(data) >= 4 and self.model != data[3]:
+            self.model = data[3]
+            log.info("Treadmill model code 0x%02x", self.model)
+        if kind == 0xD1 and bytes(data) != self.last_d1:
+            log.debug("status %s", data.hex(" "))
+            self.last_d1 = bytes(data)
+        # The motor base expects these packets to be echoed back as an ack
+        # (the Echelon app also acks 0xD1 and 0xD4 on the Stride-4s), whichever
+        # source the values are read from.
+        if kind in (0xD0, 0xD2, 0xD3) or (kind in (0xD1, 0xD4) and self.model == MODEL_STRIDE_4S):
+            asyncio.get_running_loop().create_task(self._safe_write(bytes(data)))
+        if self.last_ftms_rx and time.monotonic() - self.last_ftms_rx < 5:
+            return  # FTMS data is flowing and is the better source
+        w.raw = data.hex(" ")
         now = time.monotonic()
         if kind == 0xD3 and len(data) >= 5:
             self.last_d3 = now
             w.speed = ((data[3] << 8) | data[4]) / 1000.0
         elif kind == 0xD2 and len(data) >= 4:
             w.incline = data[3]
-        elif kind == 0xA1 and len(data) >= 4:
-            if self.model != data[3]:
-                self.model = data[3]
-                log.info("Treadmill model code 0x%02x", self.model)
         elif kind == 0xD1:
-            if bytes(data) != self.last_d1:
-                log.debug("status %s", data.hex(" "))
-                self.last_d1 = bytes(data)
             if self.model == MODEL_STRIDE_4S and len(data) >= 13:
                 # Layout used by the Echelon app for this model: elapsed seconds,
                 # distance (thousandths of the console's unit), calories, heart rate.
@@ -694,10 +711,6 @@ class StrideBLE:
                 if len(data) > 11:
                     w.set_heart_rate(data[11])
         w.tick()
-        # The motor base expects these packets to be echoed back as an ack
-        # (the Echelon app also acks 0xD1 and 0xD4 on the Stride-4s).
-        if kind in (0xD0, 0xD2, 0xD3) or (kind in (0xD1, 0xD4) and self.model == MODEL_STRIDE_4S):
-            asyncio.get_running_loop().create_task(self._safe_write(bytes(data)))
 
     async def _safe_write(self, data):
         try:
@@ -1082,6 +1095,7 @@ def make_app(workout, ble=None, controls=None):
         return web.json_response({
             "connected": workout.connected,
             "model": None if ble is None or ble.model is None else f"0x{ble.model:02x}",
+            "challenge": ble.challenge if ble else None,
             "commands": DEBUG_COMMANDS,
             "tests": [dict(c, packets=[p.hex(" ") for p in c["packets"]])
                       for c in speed_test_commands(workout)],

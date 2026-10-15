@@ -150,6 +150,10 @@ async function refresh() {
     b.textContent = d.connected ? "connected" : "not connected";
     s.append(b);
     if (d.model) s.append(" · model " + d.model);
+    s.append(document.createElement("br"));
+    s.append(d.challenge
+      ? "Unlock challenge (E0): " + d.challenge.hex + " at " + new Date(d.challenge.t * 1000).toLocaleTimeString()
+      : "No unlock challenge (E0) received since the server started.");
     document.querySelectorAll("#cmds button, #tests button").forEach((btn) => (btn.disabled = !d.connected));
     renderLog(d.packets);
   } catch (e) {
