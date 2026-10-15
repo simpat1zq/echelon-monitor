@@ -28,7 +28,7 @@ jobs:
       - name: Include the latest Android overlay APK
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release download android -p echelon-overlay.apk -D web --clobber || echo "No APK published yet"
+        run: gh release download android -p 'echelon-overlay.*' -D web --clobber || echo "No APK published yet"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:

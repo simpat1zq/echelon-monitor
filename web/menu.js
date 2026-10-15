@@ -40,7 +40,29 @@
   const app = window.EchelonApp;
   const overlay = el("button", "item");
   const server = el("button", "item", "Server address");
+  const update = el("button", "item", "Check for app update");
   overlay.hidden = server.hidden = !app;
+  update.hidden = !(app && app.installUpdate);
+  update.onclick = async () => {
+    close();
+    let latest;
+    try {
+      const r = await fetch("/echelon-overlay.json", { cache: "no-store" });
+      if (!r.ok) throw new Error("no update info on the server");
+      latest = await r.json();
+    } catch (e) {
+      alert("Couldn't check for updates: " + e.message);
+      return;
+    }
+    const mine = app.appVersion();
+    if (latest.versionCode > mine) {
+      if (confirm("Update the app to version " + latest.versionName + "? (You have 1.0." + mine + ")")) {
+        app.installUpdate(new URL("/echelon-overlay.apk", location.href).href);
+      }
+    } else {
+      alert("The app is up to date (version 1.0." + mine + ").");
+    }
+  };
   const refreshApp = () => {
     if (!app) return;
     overlay.textContent = app.overlayRunning() ? "Stop overlay" : "Start overlay";
@@ -70,7 +92,7 @@
     lastActive = Date.now();
     updateAwake();
   };
-  drawer.append(overlay, fs, timeoutItem, apk, server, link("/debug", "Debug", "muted-link"));
+  drawer.append(overlay, fs, timeoutItem, apk, update, server, link("/debug", "Debug", "muted-link"));
 
   document.body.append(scrim, drawer);
   const open = () => {

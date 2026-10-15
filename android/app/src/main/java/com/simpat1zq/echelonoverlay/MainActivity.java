@@ -2,10 +2,14 @@ package com.simpat1zq.echelonoverlay;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.PendingIntent;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageInstaller;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.net.http.SslError;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -15,11 +19,18 @@ import android.view.View;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.SslErrorHandler;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Toast;
+
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
 /**
  * Full-screen wrapper around the dashboard web page. The page's menu gets extra
@@ -34,6 +45,8 @@ public class MainActivity extends Activity {
     private WebView web;
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean startAfterPermission = false;
+    private String pendingUpdateUrl = null;
+    private static final String ACTION_INSTALL_STATUS = "install_status";
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -48,6 +61,8 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         web.addJavascriptInterface(new Bridge(), "EchelonApp");
         web.setWebViewClient(new Client());
+        // Without a WebChromeClient, alert()/confirm()/prompt() silently do nothing.
+        web.setWebChromeClient(new WebChromeClient());
         setContentView(web);
         hideSystemBars();
         web.loadUrl(serverUrl());
@@ -60,7 +75,25 @@ public class MainActivity extends Activity {
             startAfterPermission = false;
             startOverlay();
         }
+        if (pendingUpdateUrl != null && getPackageManager().canRequestPackageInstalls()) {
+            String url = pendingUpdateUrl;
+            pendingUpdateUrl = null;
+            installUpdate(url);
+        }
         refreshMenu();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (!ACTION_INSTALL_STATUS.equals(intent.getAction())) return;
+        int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
+        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            Intent confirm = intent.getParcelableExtra(Intent.EXTRA_INTENT);
+            if (confirm != null) startActivity(confirm);
+        } else if (status != PackageInstaller.STATUS_SUCCESS) {
+            toast("Update not installed: " + intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE));
+        }
     }
 
     @Override
@@ -117,6 +150,60 @@ public class MainActivity extends Activity {
         web.evaluateJavascript(
                 "window.TreadmillMenu && window.TreadmillMenu.refreshApp && window.TreadmillMenu.refreshApp()",
                 null);
+    }
+
+    // --- app updates ------------------------------------------------------
+
+    private int appVersion() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return info.versionCode;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    /** Downloads the APK and hands it to Android's installer, which asks to confirm. */
+    private void installUpdate(String apkUrl) {
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            pendingUpdateUrl = apkUrl;
+            toast("Allow installing updates from this app, then come back.");
+            startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName())));
+            return;
+        }
+        toast("Downloading update…");
+        new Thread(() -> {
+            try {
+                PackageInstaller installer = getPackageManager().getPackageInstaller();
+                int id = installer.createSession(new PackageInstaller.SessionParams(
+                        PackageInstaller.SessionParams.MODE_FULL_INSTALL));
+                try (PackageInstaller.Session session = installer.openSession(id)) {
+                    HttpURLConnection c = (HttpURLConnection) new URL(apkUrl).openConnection();
+                    c.setConnectTimeout(10000);
+                    c.setReadTimeout(30000);
+                    try (InputStream in = c.getInputStream();
+                         OutputStream out = session.openWrite("update.apk", 0, -1)) {
+                        byte[] buf = new byte[65536];
+                        int n;
+                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                        session.fsync(out);
+                    } finally {
+                        c.disconnect();
+                    }
+                    Intent status = new Intent(this, MainActivity.class).setAction(ACTION_INSTALL_STATUS);
+                    int flags = PendingIntent.FLAG_UPDATE_CURRENT
+                            | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0);
+                    session.commit(PendingIntent.getActivity(this, 1, status, flags).getIntentSender());
+                }
+            } catch (Exception e) {
+                main.post(() -> toast("Update failed: " + e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void toast(String msg) {
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
     }
 
     // --- server address ---------------------------------------------------
@@ -213,6 +300,16 @@ public class MainActivity extends Activity {
                 if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             });
+        }
+
+        @JavascriptInterface
+        public int appVersion() {
+            return MainActivity.this.appVersion();
+        }
+
+        @JavascriptInterface
+        public void installUpdate(String apkUrl) {
+            main.post(() -> MainActivity.this.installUpdate(apkUrl));
         }
 
         @JavascriptInterface

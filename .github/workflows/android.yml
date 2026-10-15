@@ -28,9 +28,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp android/app/build/outputs/apk/debug/app-debug.apk echelon-overlay.apk
+          echo '{"versionCode": ${{ github.run_number }}, "versionName": "1.0.${{ github.run_number }}"}' > echelon-overlay.json
           if ! gh release view android >/dev/null 2>&1; then
             gh release create android --target "$GITHUB_SHA" --latest=false \
               --title "Android overlay app" \
               --notes "Floating treadmill stats for Android. Download echelon-overlay.apk on the tablet and install it."
           fi
-          gh release upload android echelon-overlay.apk --clobber
+          gh release upload android echelon-overlay.apk echelon-overlay.json --clobber

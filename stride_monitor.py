@@ -843,7 +843,7 @@ def make_app(workout, ble=None):
 
     content_types = {".webmanifest": "application/manifest+json", ".js": "text/javascript",
                      ".css": "text/css", ".apk": "application/vnd.android.package-archive",
-                     ".ico": "image/x-icon", ".png": "image/png"}
+                     ".ico": "image/x-icon", ".png": "image/png", ".json": "application/json"}
 
     async def static_file(request):
         name = request.match_info["name"]
@@ -853,7 +853,7 @@ def make_app(workout, ble=None):
             raise web.HTTPNotFound()
         resp = web.FileResponse(path)
         resp.content_type = content_types[ext]
-        if ext in (".js", ".css", ".webmanifest"):
+        if ext in (".js", ".css", ".webmanifest", ".json"):
             resp.headers["Cache-Control"] = "no-cache"
         if ext == ".apk":
             resp.headers["Content-Disposition"] = f'attachment; filename="{name}"'
