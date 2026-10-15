@@ -750,6 +750,16 @@ def make_app(workout, ble=None):
     async def index(_request):
         return web.FileResponse(os.path.join(HERE, "index.html"))
 
+    def static(name, content_type=None, cache=True):
+        async def handler(_request):
+            resp = web.FileResponse(os.path.join(HERE, name))
+            if content_type:
+                resp.content_type = content_type
+            if not cache:
+                resp.headers["Cache-Control"] = "no-cache"
+            return resp
+        return handler
+
     async def runs_page(_request):
         return web.FileResponse(os.path.join(HERE, "runs.html"))
 
@@ -818,6 +828,10 @@ def make_app(workout, ble=None):
     app.router.add_get("/api/debug", debug_state)
     app.router.add_post("/api/debug/{cmd}", debug_send)
     app.router.add_get("/runs", runs_page)
+    app.router.add_get("/manifest.webmanifest", static("manifest.webmanifest", "application/manifest+json"))
+    app.router.add_get("/sw.js", static("sw.js", "text/javascript", cache=False))
+    app.router.add_get("/icon-192.png", static("icon-192.png"))
+    app.router.add_get("/icon-512.png", static("icon-512.png"))
     app.router.add_get("/api/runs", runs_api)
     app.router.add_get("/api/runs/{run_id:\\d+}/samples", run_samples)
     app.router.add_delete("/api/runs/{run_id:\\d+}", run_delete)

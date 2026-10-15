@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0f1115">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
 <title>Treadmill Live</title>
 <style>
   :root {
@@ -34,6 +38,8 @@
   button { background: var(--card); color: var(--text); border: 1px solid #333a46; border-radius: 8px; padding: 8px 14px; font-size: 14px; }
   code { word-break: break-all; }
   nav a { color: var(--accent); text-decoration: none; font-size: 15px; }
+  nav { display: flex; align-items: center; gap: 12px; }
+  .fs { padding: 4px 10px; font-size: 16px; line-height: 1; }
   .runbar { margin: -4px 0 12px; font-size: 14px; color: var(--muted); min-height: 1.2em; }
   [hidden] { display: none !important; }
 </style>
@@ -41,7 +47,7 @@
 <body>
 <header>
   <h1>Treadmill Live</h1>
-  <nav><a href="/runs">Runs</a></nav>
+  <nav><a href="/runs">Runs</a> <button id="fs" class="fs" title="Full screen">⛶</button></nav>
   <div class="status"><span class="dot" id="dot"></span><span id="status">Connecting…</span></div>
 </header>
 
@@ -179,6 +185,30 @@ $("endRun").onclick = async () => {
   await fetch("/api/end", { method: "POST" });
 };
 window.addEventListener("resize", draw);
+
+// Full screen on demand (fallback when the home-screen app isn't installed).
+const fsBtn = $("fs");
+fsBtn.hidden = !document.documentElement.requestFullscreen ||
+  window.matchMedia("(display-mode: fullscreen)").matches;
+fsBtn.onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+};
+
+// Keep the screen on while the dashboard is open.
+let wakeLock = null;
+async function keepAwake() {
+  try {
+    if ("wakeLock" in navigator && document.visibilityState === "visible" && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => (wakeLock = null));
+    }
+  } catch (e) { /* not supported or not allowed */ }
+}
+document.addEventListener("visibilitychange", keepAwake);
+keepAwake();
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 connect();
 </script>
 </body>
