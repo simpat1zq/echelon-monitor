@@ -1,5 +1,6 @@
 // Shared slide-out menu: pages, who's running, manage users, full screen,
-// the Android overlay app and debug. Needs a <button id="menuBtn"> on the page.
+// the Android app and debug. Inside the Android app it also offers
+// start/stop overlay and the server address. Needs a <button id="menuBtn">.
 (function () {
   const el = (tag, cls, text) => {
     const e = document.createElement(tag);
@@ -31,13 +32,37 @@
     if (document.fullscreenElement) document.exitFullscreen();
     else document.documentElement.requestFullscreen().catch(() => {});
   };
-  const apk = link("/echelon-overlay.apk", "Android overlay app (APK)");
+  const apk = link("/echelon-overlay.apk", "Android app (APK)");
   apk.hidden = true;
   apk.setAttribute("download", "");
-  drawer.append(fs, apk, link("/debug", "Debug", "muted-link"));
+
+  // Extra items when the page runs inside the Android app (EchelonApp bridge).
+  const app = window.EchelonApp;
+  const overlay = el("button", "item");
+  const server = el("button", "item", "Server address");
+  overlay.hidden = server.hidden = !app;
+  const refreshApp = () => {
+    if (!app) return;
+    overlay.textContent = app.overlayRunning() ? "Stop overlay" : "Start overlay";
+  };
+  overlay.onclick = () => {
+    app.toggleOverlay();
+    close();
+    setTimeout(refreshApp, 800);
+  };
+  server.onclick = () => {
+    const url = prompt("Dashboard server address", app.serverUrl());
+    if (url) app.setServerUrl(url);
+  };
+  if (app) fs.hidden = true;  // the app is already full screen
+  refreshApp();
+  drawer.append(overlay, fs, apk, server, link("/debug", "Debug", "muted-link"));
 
   document.body.append(scrim, drawer);
-  const open = () => document.body.classList.add("menu-open");
+  const open = () => {
+    refreshApp();
+    document.body.classList.add("menu-open");
+  };
   const close = () => document.body.classList.remove("menu-open");
   scrim.onclick = close;
   document.addEventListener("keydown", (e) => e.key === "Escape" && close());
@@ -71,7 +96,9 @@
     if (!data.users.length) users.append(el("div", "item sub", "No users yet. Add one below."));
   }
 
-  fetch("/echelon-overlay.apk", { method: "HEAD" }).then((r) => { apk.hidden = !r.ok; }).catch(() => {});
+  if (!app) {
+    fetch("/echelon-overlay.apk", { method: "HEAD" }).then((r) => { apk.hidden = !r.ok; }).catch(() => {});
+  }
   load();
-  window.TreadmillMenu = { open, close, reload: load };
+  window.TreadmillMenu = { open, close, reload: load, refreshApp };
 })();
