@@ -646,8 +646,8 @@ class StrideBLE:
                     w.set_heart_rate(data[11])
         w.tick()
         # The motor base expects these packets to be echoed back as an ack
-        # (the Echelon app also acks 0xD4 on the Stride-4s).
-        if kind in (0xD0, 0xD2, 0xD3) or (kind == 0xD4 and self.model == MODEL_STRIDE_4S):
+        # (the Echelon app also acks 0xD1 and 0xD4 on the Stride-4s).
+        if kind in (0xD0, 0xD2, 0xD3) or (kind in (0xD1, 0xD4) and self.model == MODEL_STRIDE_4S):
             asyncio.get_running_loop().create_task(self._safe_write(bytes(data)))
 
     async def _safe_write(self, data):
