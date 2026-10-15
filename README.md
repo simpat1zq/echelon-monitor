@@ -113,6 +113,7 @@ one.
 | --- | --- |
 | Speed | Read from the treadmill (packets `0xD3` and `0xD1`) |
 | Incline | Read from the treadmill (packet `0xD2`) |
+| Calories | Read from the console's running total (Stride-4s, packet `0xD1`) |
 | Heart rate | Read from the treadmill when it reports one (packet `0xD1`, byte 11, from the grip sensors or a paired strap) |
 | Distance, time, pace, climb | Calculated from speed and incline over time |
 

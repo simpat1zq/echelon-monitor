@@ -47,6 +47,11 @@ INIT_GENERIC = [
     "f0a30093",
     "f0a10091",
 ]
+# Model code reported in the 0xA1 reply; the Stride-4s reports 0x20.
+MODEL_STRIDE_4S = 0x20
+# Read-only queries the Echelon app sends after the basic init on this model.
+INIT_STRIDE_4S_EXTRA = ["f0a20092", "f0a50095", "f0a60096", "f0a70097", "f0a80098"]
+
 INIT_STRIDE4 = [
     "f0a40094", "f0a40094",
     "f0e0fd3e6548d58d",
@@ -81,7 +86,8 @@ class RunStore:
                 max_speed REAL,
                 elevation_ft REAL,
                 avg_hr REAL,
-                max_hr INTEGER
+                max_hr INTEGER,
+                calories INTEGER
             );
             CREATE TABLE IF NOT EXISTS samples (
                 run_id INTEGER NOT NULL,
@@ -90,10 +96,17 @@ class RunStore:
                 incline REAL,
                 hr INTEGER,
                 distance REAL,
-                elevation_ft REAL
+                elevation_ft REAL,
+                calories INTEGER
             );
             CREATE INDEX IF NOT EXISTS samples_run ON samples(run_id);
         """)
+        # Add columns introduced after the first release.
+        for table in ("runs", "samples"):
+            cols = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if "calories" not in cols:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN calories INTEGER")
+        self.db.commit()
         # Finish runs left open by a crash or restart.
         for row in self.db.execute("SELECT id FROM runs WHERE ended IS NULL").fetchall():
             self.finish(row["id"])
@@ -103,9 +116,10 @@ class RunStore:
         self.db.commit()
         return cur.lastrowid
 
-    def add_sample(self, run_id, t, speed, incline, hr, distance, elevation_ft):
-        self.db.execute("INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (run_id, t, speed, incline, hr or None, distance, elevation_ft))
+    def add_sample(self, run_id, t, speed, incline, hr, distance, elevation_ft, calories=None):
+        self.db.execute("INSERT INTO samples (run_id, t, speed, incline, hr, distance, elevation_ft, calories)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (run_id, t, speed, incline, hr or None, distance, elevation_ft, calories))
         self.db.commit()
 
     def finish(self, run_id):
@@ -120,7 +134,8 @@ class RunStore:
                    SUM(CASE WHEN speed > 0 THEN 1 ELSE 0 END) AS moving_s,
                    MAX(distance) AS distance, MAX(speed) AS max_speed,
                    MAX(elevation_ft) AS elevation_ft,
-                   AVG(hr) AS avg_hr, MAX(hr) AS max_hr
+                   AVG(hr) AS avg_hr, MAX(hr) AS max_hr,
+                   MAX(calories) - MIN(calories) AS calories
             FROM samples WHERE run_id = ?""", (run_id,)).fetchone()
         moving = r["moving_s"] or 0
         if moving < self.MIN_RUN_SECONDS:
@@ -129,10 +144,10 @@ class RunStore:
         distance = r["distance"] or 0.0
         self.db.execute("""
             UPDATE runs SET ended = ?, moving_s = ?, distance = ?, avg_speed = ?, max_speed = ?,
-                            elevation_ft = ?, avg_hr = ?, max_hr = ?
+                            elevation_ft = ?, avg_hr = ?, max_hr = ?, calories = ?
             WHERE id = ?""",
                         (r["ended"], moving, distance, distance / (moving / 3600.0), r["max_speed"],
-                         r["elevation_ft"], r["avg_hr"], r["max_hr"], run_id))
+                         r["elevation_ft"], r["avg_hr"], r["max_hr"], r["calories"] or None, run_id))
         self.db.commit()
         return True
 
@@ -168,6 +183,10 @@ class Workout:
         self.incline = 0
         self.heart_rate = 0
         self.hr_seen = False      # only show heart rate once the treadmill reports one
+        self.calories = None      # console's calorie count (Stride-4s), None if not reported
+        self.console_seconds = None
+        self.console_distance = None
+        self._run_cal_start = None
         self.raw = ""
         self.run_id = None
         self.run_started = None
@@ -211,6 +230,7 @@ class Workout:
         self.last_saved = None
         self.run_started = time.time()
         self._last_active = time.monotonic()
+        self._run_cal_start = self.calories
         if self.store:
             self.run_id = self.store.start(self.run_started, "km" if self.metric else "mi")
         else:
@@ -230,7 +250,16 @@ class Workout:
         if self.run_id and self.store:
             self.store.add_sample(self.run_id, time.time(), round(self.speed, 2), self.incline,
                                   self.heart_rate if self.hr_seen else None,
-                                  round(self.distance, 4), round(self.elevation_ft, 1))
+                                  round(self.distance, 4), round(self.elevation_ft, 1), self.calories)
+
+    def run_calories(self):
+        """Calories burned this run, from the console's running total."""
+        if self.calories is None:
+            return None
+        if self._run_cal_start is None or self.calories < self._run_cal_start:
+            # First reading of this run, or the console started a new count.
+            self._run_cal_start = self.calories if self._run_cal_start is None else 0
+        return self.calories - self._run_cal_start
 
     def snapshot(self):
         unit = "km/h" if self.metric else "mph"
@@ -248,6 +277,7 @@ class Workout:
             "incline": self.incline,
             "heart_rate": self.heart_rate,
             "hr_seen": self.hr_seen,
+            "calories": self.run_calories(),
             "distance": round(self.distance, 3),
             "distance_unit": "km" if self.metric else "mi",
             "pace_min": pace,
@@ -287,6 +317,7 @@ class StrideBLE:
         self.last_ftms_rx = 0.0
         self.last_d3 = 0.0
         self.last_d1 = b""
+        self.model = None
 
     async def find_device(self):
         from bleak import BleakScanner
@@ -378,21 +409,32 @@ class StrideBLE:
             w.speed = ((data[3] << 8) | data[4]) / 1000.0
         elif kind == 0xD2 and len(data) >= 4:
             w.incline = data[3]
+        elif kind == 0xA1 and len(data) >= 4:
+            if self.model != data[3]:
+                self.model = data[3]
+                log.info("Treadmill model code 0x%02x", self.model)
         elif kind == 0xD1:
             if bytes(data) != self.last_d1:
-                # Status packet, sent about once a second. Logged on change so
-                # its layout can be worked out from a real workout.
-                log.info("status %s", data.hex(" "))
+                log.debug("status %s", data.hex(" "))
                 self.last_d1 = bytes(data)
-            # Stride4-family consoles report speed here (hundredths). Use it
-            # unless the treadmill is also sending the older 0xD3 speed packets.
-            if len(data) >= 9 and (self.is_stride4 or now - self.last_d3 > 5):
-                w.speed = ((data[7] << 8) | data[8]) / 100.0
-            if len(data) > 11:
+            if self.model == MODEL_STRIDE_4S and len(data) >= 13:
+                # Layout used by the Echelon app for this model: elapsed seconds,
+                # distance (thousandths of the console's unit), calories, heart rate.
+                w.console_seconds = (data[3] << 8) | data[4]
+                w.console_distance = int.from_bytes(data[5:9], "big") / 1000.0
+                w.calories = (data[9] << 8) | data[10]
                 w.set_heart_rate(data[11])
+            else:
+                # Stride4-family consoles report speed here (hundredths). Use it
+                # unless the treadmill is also sending 0xD3 speed packets.
+                if len(data) >= 9 and (self.is_stride4 or now - self.last_d3 > 5):
+                    w.speed = ((data[7] << 8) | data[8]) / 100.0
+                if len(data) > 11:
+                    w.set_heart_rate(data[11])
         w.tick()
-        # The motor base expects these packets to be echoed back as an ack.
-        if kind in (0xD0, 0xD2, 0xD3):
+        # The motor base expects these packets to be echoed back as an ack
+        # (the Echelon app also acks 0xD4 on the Stride-4s).
+        if kind in (0xD0, 0xD2, 0xD3) or (kind == 0xD4 and self.model == MODEL_STRIDE_4S):
             asyncio.get_running_loop().create_task(self._safe_write(bytes(data)))
 
     async def _safe_write(self, data):
@@ -536,7 +578,13 @@ class StrideBLE:
     async def send_init(self):
         if not self.has_echelon:
             return
-        for cmd in INIT_STRIDE4 if self.is_stride4 else INIT_GENERIC:
+        cmds = INIT_STRIDE4 if self.is_stride4 else INIT_GENERIC
+        # The 0xA1 reply tells us the model; the extra queries depend on it.
+        for cmd in cmds + [None] + INIT_STRIDE_4S_EXTRA:
+            if cmd is None:
+                if self.model != MODEL_STRIDE_4S:
+                    break
+                continue
             try:
                 await self.write(cmd)
             except Exception as exc:  # noqa: BLE001

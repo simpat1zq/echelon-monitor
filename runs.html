@@ -161,6 +161,7 @@ async function load() {
     stats.append(stat("Avg speed", (r.avg_speed || 0).toFixed(1), speedUnit));
     stats.append(stat("Max speed", (r.max_speed || 0).toFixed(1), speedUnit));
     stats.append(stat("Climb", Math.round(r.elevation_ft || 0), "ft"));
+    if (r.calories) stats.append(stat("Calories", r.calories, "kcal"));
     if (r.avg_hr) stats.append(stat("Avg HR", Math.round(r.avg_hr), "bpm", "hr"));
     card.append(head, stats);
     card.onclick = () => toggleDetail(card, r);

@@ -58,6 +58,7 @@
   <div class="card"><div class="label">Pace</div><div class="value"><span id="pace">--</span><span class="unit" id="paceUnit">/mi</span></div></div>
   <div class="card"><div class="label">Incline</div><div class="value"><span id="incline">0</span><span class="unit">%</span></div></div>
   <div class="card hr" id="hrCard" hidden><div class="label">Heart rate</div><div class="value"><span id="hr">--</span><span class="unit">bpm</span></div></div>
+  <div class="card" id="calCard" hidden><div class="label">Calories</div><div class="value"><span id="cal">0</span><span class="unit">kcal</span></div></div>
   <div class="card"><div class="label">Climb</div><div class="value"><span id="elev">0</span><span class="unit">ft</span></div></div>
 </div>
 
@@ -121,6 +122,8 @@ function render(d) {
   $("paceUnit").textContent = d.pace_unit;
   $("incline").textContent = d.incline;
   $("hrCard").hidden = !d.hr_seen;
+  $("calCard").hidden = d.calories == null;
+  if (d.calories != null) $("cal").textContent = d.calories;
   $("hr").textContent = d.heart_rate || "--";
   $("endRun").hidden = !d.run_active;
   $("runbar").textContent = runStatus(d);
