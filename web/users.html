@@ -44,6 +44,12 @@
   .hint { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.4; }
   .error { color: var(--bad); font-size: 14px; margin-top: 10px; }
   .empty { color: var(--muted); text-align: center; padding: 24px 0; }
+  .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, .6); display: flex; align-items: center;
+           justify-content: center; padding: 16px; z-index: 30; }
+  .sheet { background: var(--card); border-radius: 14px; padding: 16px; width: min(480px, 100%); }
+  .sheet h2 { font-size: 16px; margin: 0 0 12px; }
+  .sheet video { width: 100%; border-radius: 10px; background: #000; transform: scaleX(-1); display: block; }
+  .sheet .actions { flex-wrap: wrap; }
   [hidden] { display: none !important; }
 </style>
 <link rel="stylesheet" href="/menu.css">
@@ -55,7 +61,8 @@
 </header>
 
 <p class="intro">Pick who's running from the menu. Weight is used to estimate calories from speed and
-  incline. If the treadmill reports heart rate, age and sex make the estimate more accurate.</p>
+  incline. If the treadmill reports heart rate, age and sex make the estimate more accurate.
+  Set up a face, and the app offers to switch to whoever it sees when a run starts.</p>
 
 <div id="list"><div class="empty">Loading…</div></div>
 <button class="btn wide" id="addBtn">Add user</button>
@@ -98,6 +105,20 @@
   <div class="hint">Without a weight, calories fall back to the treadmill console's own count.</div>
 </form>
 
+<div class="modal" id="faceModal" hidden>
+  <div class="sheet">
+    <h2 id="faceTitle">Face</h2>
+    <video id="faceVideo" muted playsinline></video>
+    <div class="hint" id="faceStatus"></div>
+    <div class="actions">
+      <button type="button" class="btn ghost" id="faceClose">Close</button>
+      <button type="button" class="btn danger" id="faceClear">Clear face</button>
+      <button type="button" class="btn" id="faceTake">Take photos</button>
+    </div>
+  </div>
+</div>
+
+<script src="/face.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const LB = 0.45359237, IN = 2.54;
@@ -119,6 +140,7 @@ function describe(u) {
   }
   if (u.age) parts.push(u.age + " yrs");
   if (u.sex) parts.push(u.sex === "male" ? "Male" : "Female");
+  if (u.face_count) parts.push("Face set up");
   return parts.length ? parts.join(" · ") : "No details yet";
 }
 
@@ -146,7 +168,13 @@ async function load() {
       await fetch("/api/users/" + u.id, { method: "DELETE" });
       refresh();
     };
-    card.append(info, edit, del);
+    card.append(info, edit);
+    if (data.faces && FaceCam.supported()) {
+      const face = el("button", "btn ghost", "Face");
+      face.onclick = () => openFace(u);
+      card.append(face);
+    }
+    card.append(del);
     list.append(card);
   }
 }
@@ -204,6 +232,68 @@ $("form").onsubmit = async (e) => {
   closeForm();
   refresh();
 };
+
+// --- face setup -------------------------------------------------------------
+// Takes a few photos while the person looks at the camera; the server keeps a
+// face signature from each (not the photos), used to spot who starts a run.
+const PHOTOS = 5;
+let faceUser = null, faceStream = null;
+
+async function openFace(u) {
+  faceUser = u;
+  $("faceTitle").textContent = "Face for " + u.name;
+  $("faceClear").hidden = !u.face_count;
+  $("faceTake").disabled = true;
+  $("faceStatus").textContent = "Starting the camera…";
+  $("faceModal").hidden = false;
+  try {
+    faceStream = await FaceCam.open($("faceVideo"));
+    $("faceTake").disabled = false;
+    $("faceStatus").textContent = u.face_count
+      ? `${u.face_count} photos saved. Take more to improve recognition, e.g. in different light.`
+      : `Look at the camera from where you stand on the treadmill, then tap Take photos.`;
+  } catch (e) {
+    $("faceStatus").textContent = "Couldn't open the camera: " + e.message;
+  }
+}
+
+function closeFace() {
+  FaceCam.close(faceStream);
+  faceStream = null;
+  $("faceModal").hidden = true;
+  refresh();
+}
+
+$("faceTake").onclick = async () => {
+  $("faceTake").disabled = $("faceClose").disabled = true;
+  let found = 0, total = 0;
+  try {
+    for (let i = 0; i < PHOTOS; i++) {
+      $("faceStatus").textContent = `Taking photo ${i + 1} of ${PHOTOS}… keep looking at the camera.`;
+      await FaceCam.sleep(600);
+      const r = await FaceCam.post(`/api/users/${faceUser.id}/face`, await FaceCam.snap($("faceVideo")));
+      if (r.face) found++;
+      total = r.count;
+    }
+    $("faceStatus").textContent = found
+      ? `Found your face in ${found} of ${PHOTOS} photos (${total} saved in all). You can close this now.`
+      : "No face found. Move closer, face the camera and make sure there's light on your face.";
+    $("faceClear").hidden = !total;
+  } catch (e) {
+    $("faceStatus").textContent = "Couldn't save: " + e.message;
+  } finally {
+    $("faceTake").disabled = $("faceClose").disabled = false;
+  }
+};
+
+$("faceClear").onclick = async () => {
+  if (!confirm(`Forget ${faceUser.name}'s face?`)) return;
+  await fetch(`/api/users/${faceUser.id}/face`, { method: "DELETE" });
+  $("faceClear").hidden = true;
+  $("faceStatus").textContent = "Face cleared.";
+};
+
+$("faceClose").onclick = closeFace;
 
 function refresh() {
   load();

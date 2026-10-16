@@ -1,2 +1,5 @@
 bleak>=0.22
 aiohttp>=3.9
+# Face recognition (optional: the server runs without it)
+opencv-python-headless>=4.8
+numpy

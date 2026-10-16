@@ -26,6 +26,7 @@ import os
 import random
 import signal
 import sqlite3
+import threading
 import time
 
 from aiohttp import web
@@ -141,6 +142,11 @@ class RunStore:
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+            CREATE TABLE IF NOT EXISTS faces (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                embedding BLOB NOT NULL
+            );
         """)
         # Add columns introduced after the first release.
         for table, col, kind in (("runs", "calories", "INTEGER"), ("samples", "calories", "INTEGER"),
@@ -168,7 +174,9 @@ class RunStore:
     USER_FIELDS = ("name", "weight_kg", "height_cm", "age", "sex")
 
     def list_users(self):
-        return [dict(r) for r in self.db.execute("SELECT * FROM users ORDER BY name COLLATE NOCASE")]
+        return [dict(r) for r in self.db.execute(
+            "SELECT users.*, (SELECT COUNT(*) FROM faces WHERE faces.user_id = users.id) AS face_count "
+            "FROM users ORDER BY name COLLATE NOCASE")]
 
     def get_user(self, user_id):
         if user_id is None:
@@ -191,9 +199,23 @@ class RunStore:
     def delete_user(self, user_id):
         self.db.execute("UPDATE runs SET user_id = NULL WHERE user_id = ?", (user_id,))
         self.db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        self.db.execute("DELETE FROM faces WHERE user_id = ?", (user_id,))
         if self.get_setting("active_user") == str(user_id):
             self.set_setting("active_user", None)
         self.db.commit()
+
+    # --- face signatures (no photos are kept) ---
+
+    def add_face(self, user_id, embedding):
+        self.db.execute("INSERT INTO faces (user_id, embedding) VALUES (?, ?)", (user_id, embedding))
+        self.db.commit()
+
+    def clear_faces(self, user_id):
+        self.db.execute("DELETE FROM faces WHERE user_id = ?", (user_id,))
+        self.db.commit()
+
+    def faces(self):
+        return [(r[0], r[1]) for r in self.db.execute("SELECT user_id, embedding FROM faces")]
 
     def get_setting(self, key):
         r = self.db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -255,6 +277,67 @@ class RunStore:
         rows = self.db.execute("SELECT t, speed, incline, hr FROM samples WHERE run_id = ? ORDER BY t",
                                (run_id,))
         return [dict(r) for r in rows]
+
+
+class FaceEngine:
+    """Face signatures with OpenCV's YuNet detector and SFace recognizer.
+
+    A signature is 128 numbers describing a face; photos are only used to make
+    one and are never stored.
+    """
+
+    DETECTOR = "face_detection_yunet_2023mar.onnx"
+    RECOGNIZER = "face_recognition_sface_2021dec.onnx"
+    MATCH = 0.363  # cosine similarity OpenCV recommends for SFace
+
+    def __init__(self, model_dir):
+        import cv2
+        import numpy
+
+        self.cv2, self.np = cv2, numpy
+        self.detector = cv2.FaceDetectorYN.create(os.path.join(model_dir, self.DETECTOR), "", (320, 320), 0.8)
+        self.recognizer = cv2.FaceRecognizerSF.create(os.path.join(model_dir, self.RECOGNIZER), "")
+        self.lock = threading.Lock()  # the OpenCV models aren't thread-safe
+
+    @classmethod
+    def load(cls, model_dir):
+        try:
+            engine = cls(model_dir)
+        except Exception as exc:  # noqa: BLE001
+            log.info("Face recognition off (%s).", exc)
+            return None
+        log.info("Face recognition on.")
+        return engine
+
+    def signature(self, image_bytes):
+        """The signature of the largest face in a JPEG/PNG, or None if there's no face."""
+        cv2, np = self.cv2, self.np
+        img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("not an image")
+        h, w = img.shape[:2]
+        if max(h, w) > 800:
+            k = 800 / max(h, w)
+            img = cv2.resize(img, (round(w * k), round(h * k)))
+            h, w = img.shape[:2]
+        with self.lock:
+            self.detector.setInputSize((w, h))
+            _, faces = self.detector.detect(img)
+            if faces is None or not len(faces):
+                return None
+            face = max(faces, key=lambda f: f[2] * f[3])
+            feature = self.recognizer.feature(self.recognizer.alignCrop(img, face))
+        vec = feature.flatten().astype(np.float32)
+        return vec / (np.linalg.norm(vec) or 1.0)
+
+    def best_match(self, signature, known):
+        """(user_id, similarity) of the closest known face above the threshold, else None."""
+        best = None
+        for user_id, blob in known:
+            score = float(self.np.dot(signature, self.np.frombuffer(blob, self.np.float32)))
+            if score >= self.MATCH and (best is None or score > best[1]):
+                best = (user_id, score)
+        return best
 
 
 def kcal_per_minute(user, speed_kmh, grade_pct, heart_rate=0):
@@ -423,6 +506,7 @@ class Workout:
             "moving_seconds": int(self.moving_seconds),
             "max_speed": round(self.max_speed, 2),
             "run_active": self.run_id is not None,
+            "run_started": self.run_started if self.run_id is not None else None,
             "idle_left": idle_left,
             "last_saved": self.last_saved,
             "history": self.store is not None,
@@ -830,7 +914,7 @@ async def csv_logger(workout, path):
                 fh.flush()
 
 
-def make_app(workout, ble=None):
+def make_app(workout, ble=None, faces=None):
     clients = set()
 
     def page(name):
@@ -909,9 +993,48 @@ def make_app(workout, ble=None):
 
     async def users_api(_request):
         if not workout.store:
-            return web.json_response({"history": False, "users": [], "active_id": None})
+            return web.json_response({"history": False, "users": [], "active_id": None, "faces": False})
         return web.json_response({"history": True, "users": workout.store.list_users(),
-                                  "active_id": workout.user["id"] if workout.user else None})
+                                  "active_id": workout.user["id"] if workout.user else None,
+                                  "faces": faces is not None})
+
+    async def face_signature(request):
+        if faces is None:
+            raise web.HTTPConflict(text="Face recognition isn't available on this server.")
+        data = await request.read()
+        try:
+            return await asyncio.get_running_loop().run_in_executor(None, faces.signature, data)
+        except ValueError:
+            raise web.HTTPBadRequest(text="Send a JPEG or PNG photo.")
+
+    async def face_add(request):
+        """Body: one photo. Saves the signature of the face in it to the user."""
+        store = need_store()
+        user_id = int(request.match_info["user_id"])
+        if not store.get_user(user_id):
+            raise web.HTTPNotFound()
+        sig = await face_signature(request)
+        if sig is not None:
+            store.add_face(user_id, sig.tobytes())
+        count = sum(1 for uid, _ in store.faces() if uid == user_id)
+        return web.json_response({"face": sig is not None, "count": count})
+
+    async def face_clear(request):
+        need_store().clear_faces(int(request.match_info["user_id"]))
+        return web.json_response({"ok": True})
+
+    async def identify(request):
+        """Body: one photo. Returns the user whose face it matches, if any."""
+        store = need_store()
+        sig = await face_signature(request)
+        match = faces.best_match(sig, store.faces()) if sig is not None else None
+        user = store.get_user(match[0]) if match else None
+        if user:
+            log.info("Face matches %s (%.2f).", user["name"], match[1])
+        return web.json_response({
+            "face": sig is not None,
+            "match": {"id": user["id"], "name": user["name"], "score": round(match[1], 3)} if user else None,
+        })
 
     async def user_create(request):
         user = need_store().save_user(parse_user(await request.json()))
@@ -1022,7 +1145,7 @@ def make_app(workout, ble=None):
         yield
         task.cancel()
 
-    app = web.Application()
+    app = web.Application(client_max_size=8 * 1024 * 1024)  # room for photos
     app.router.add_get("/", page("index.html"))
     app.router.add_get("/runs", page("runs.html"))
     app.router.add_get("/users", page("users.html"))
@@ -1041,6 +1164,9 @@ def make_app(workout, ble=None):
     app.router.add_put("/api/users/{user_id:\\d+}", user_update)
     app.router.add_delete("/api/users/{user_id:\\d+}", user_delete)
     app.router.add_post("/api/users/active", user_activate)
+    app.router.add_post("/api/users/{user_id:\\d+}/face", face_add)
+    app.router.add_delete("/api/users/{user_id:\\d+}/face", face_clear)
+    app.router.add_post("/api/identify", identify)
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/{name:[A-Za-z0-9._-]+}", static_file)
     app.cleanup_ctx.append(broadcaster)
@@ -1067,7 +1193,8 @@ async def main_async(args):
     if not args.demo:
         ble = StrideBLE(workout, args.address, args.name, args.debug, args.protocol,
                         args.disconnect_on_exit)
-    runner = web.AppRunner(make_app(workout, ble))
+    faces = FaceEngine.load(args.face_models) if store else None
+    runner = web.AppRunner(make_app(workout, ble, faces))
     await runner.setup()
     await web.TCPSite(runner, args.host, args.port).start()
     log.info("Echelon Monitor version %s%s", APP_VERSION[:7],
@@ -1114,6 +1241,8 @@ def main():
     p.add_argument("--db", help="SQLite file to save runs in (enables the runs page)")
     p.add_argument("--idle-timeout", type=int, default=180,
                    help="end a run after this many seconds without movement (default 180)")
+    p.add_argument("--face-models", default=os.path.join(HERE, "models"),
+                   help="folder with the YuNet and SFace face models (face recognition is off without them)")
     p.add_argument("--csv", help="also append per-second samples to this CSV file")
     p.add_argument("--demo", action="store_true", help="generate fake data (no treadmill needed)")
     p.add_argument("--scan", action="store_true", help="list nearby BLE devices and exit")

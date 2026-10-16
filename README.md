@@ -122,6 +122,21 @@ The light in the header is green while the treadmill is connected.
   after 5 minutes without a connection, at most once every 30 minutes (Android 9
   and older; newer Android doesn't let apps switch Wi-Fi).
 
+## Face recognition
+
+On the **Users** page, tap **Face** next to a user and take a few photos while
+that person looks at the tablet from where they stand on the treadmill. When a
+run starts, the Android app takes a few photos within the first seconds; if the
+face belongs to someone other than the selected runner, it asks whether to switch.
+
+- The server turns each photo into a face signature (128 numbers) with OpenCV's
+  YuNet and SFace models and keeps only that, in the run-history database. Photos
+  aren't stored or sent anywhere else.
+- It needs run history (`--db`) and the two models in `models/` (the Docker image
+  downloads them). Without them, face recognition is simply off.
+- The camera is only used in the app, and only while the app is on screen.
+- **Clear face** on the same screen deletes a user's signatures.
+
 ## Runs
 
 A run starts automatically when the belt starts moving. It ends when the belt has

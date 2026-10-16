@@ -51,6 +51,13 @@
   button { background: var(--card); color: var(--text); border: 1px solid #333a46; border-radius: 8px; padding: 8px 14px; font-size: 14px; }
   code { word-break: break-all; }
   .runbar { margin: -4px 0 12px; font-size: 14px; color: var(--muted); min-height: 1.2em; }
+  .ask { position: fixed; left: 50%; top: 16px; transform: translateX(-50%); z-index: 30; width: min(460px, calc(100% - 32px));
+         background: #22324a; border: 1px solid #2f4a6a; border-radius: 14px; padding: 14px 16px;
+         box-shadow: 0 8px 30px rgba(0, 0, 0, .5); }
+  .ask p { margin: 0 0 12px; font-size: 17px; }
+  .ask .row { display: flex; gap: 10px; }
+  .ask button { flex: 1; padding: 12px; font-size: 16px; }
+  .ask .yes { background: var(--speed); color: #0f1115; border-color: var(--speed); font-weight: 600; }
   [hidden] { display: none !important; }
 </style>
 <link rel="stylesheet" href="/menu.css">
@@ -91,6 +98,12 @@
 </footer>
 <div class="version" id="version">Version –</div>
 
+<div class="ask" id="ask" hidden>
+  <p id="askText"></p>
+  <div class="row"><button id="askNo">No</button><button class="yes" id="askYes">Switch</button></div>
+</div>
+
+<script src="/face.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const history = [];
@@ -131,8 +144,60 @@ function draw() {
   ctx.strokeStyle = "#4fc3f7"; ctx.lineWidth = 2; ctx.stroke();
 }
 
+// --- who's running? ------------------------------------------------------
+// In the Android app, a new run (seen within its first minute, with the app on
+// screen) takes a few photos and asks the server whose face it is. If it's not
+// the selected runner, offer to switch. Off in plain browsers: a phone showing
+// the dashboard isn't looking at the runner.
+let last = null, checkedRun = null, askTimer = null;
+
+async function identifyRunner() {
+  const d = last;
+  if (!d || !d.run_active || d.run_started === checkedRun || document.visibilityState !== "visible") return;
+  if (!window.EchelonApp || !FaceCam.supported() || Date.now() / 1000 - d.run_started > 60) return;
+  checkedRun = d.run_started;
+  let users;
+  try { users = await (await fetch("/api/users")).json(); } catch (e) { return; }
+  if (!users.faces || !users.users.some((u) => u.face_count)) return;
+  const video = document.createElement("video");
+  let stream = null;
+  try {
+    stream = await FaceCam.open(video);
+    for (let i = 0; i < 6; i++) {
+      await FaceCam.sleep(i ? 1500 : 1000);  // let exposure settle first
+      const r = await FaceCam.post("/api/identify", await FaceCam.snap(video));
+      if (r.match) {
+        if (!last.user || r.match.id !== last.user.id) askSwitch(r.match);
+        break;
+      }
+    }
+  } catch (e) {
+    console.warn("face check failed", e);
+  } finally {
+    FaceCam.close(stream);
+  }
+}
+
+function askSwitch(user) {
+  $("askText").textContent = `Looks like ${user.name}. Switch the runner to ${user.name}?`;
+  $("ask").hidden = false;
+  clearTimeout(askTimer);
+  askTimer = setTimeout(() => ($("ask").hidden = true), 30000);
+  $("askNo").onclick = () => ($("ask").hidden = true);
+  $("askYes").onclick = async () => {
+    $("ask").hidden = true;
+    await fetch("/api/users/active", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: user.id }),
+    });
+    if (window.TreadmillMenu) window.TreadmillMenu.reload();
+  };
+}
+document.addEventListener("visibilitychange", identifyRunner);
+
 let wasActive = null;
 function render(d) {
+  last = d;
+  identifyRunner();
   if (d.run_active && wasActive === false) history.length = 0;  // new run: fresh chart
   wasActive = d.run_active;
   $("dot").classList.toggle("on", d.connected);

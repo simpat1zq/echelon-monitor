@@ -9,3 +9,4 @@ android/app/build/
 android/local.properties
 web/echelon-overlay.apk
 web/echelon-overlay.json
+models/

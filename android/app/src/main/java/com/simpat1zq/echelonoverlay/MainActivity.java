@@ -21,6 +21,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.SslErrorHandler;
+import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -29,6 +30,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import java.util.Arrays;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -50,7 +52,8 @@ public class MainActivity extends Activity {
     private boolean startAfterPermission = false;
     private String pendingUpdateUrl = null;
     private static final String ACTION_INSTALL_STATUS = "install_status";
-    private static final int REQ_CAMERA = 7;
+    private static final int REQ_CAMERA = 7, REQ_WEB_CAMERA = 8;
+    private PermissionRequest pendingWebCamera;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -63,10 +66,26 @@ public class MainActivity extends Activity {
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
+        s.setMediaPlaybackRequiresUserGesture(false);  // the run-start face check plays the camera unprompted
         web.addJavascriptInterface(new Bridge(), "EchelonApp");
         web.setWebViewClient(new Client());
         // Without a WebChromeClient, alert()/confirm()/prompt() silently do nothing.
-        web.setWebChromeClient(new WebChromeClient());
+        // It also lets the page use the camera (face setup and recognition).
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onPermissionRequest(PermissionRequest request) {
+                main.post(() -> {
+                    if (!Arrays.asList(request.getResources()).contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) {
+                        request.deny();
+                    } else if (hasCamera()) {
+                        request.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+                    } else {
+                        pendingWebCamera = request;
+                        requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_WEB_CAMERA);
+                    }
+                });
+            }
+        });
         setContentView(web);
         web.loadUrl(serverUrl());
 
@@ -134,6 +153,11 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
         super.onRequestPermissionsResult(code, perms, results);
+        if (code == REQ_WEB_CAMERA && pendingWebCamera != null) {
+            if (hasCamera()) pendingWebCamera.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+            else pendingWebCamera.deny();
+            pendingWebCamera = null;
+        }
         if (code == REQ_CAMERA) {
             if (hasCamera()) setMotion(true);
             else toast("Wake on motion needs the camera permission.");
