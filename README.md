@@ -147,10 +147,10 @@ fastest ¼, ½ and 1 mile (0.5, 1 and 5 km on metric), change who ran it, or del
 it. A run moved to someone else shows ⇄; hover or tap it to see whose it was.
 The top of the page shows the fastest times for the person selected.
 
-While a run records, the server keeps one sample per second. When it's saved, the
-fastest times are worked out from those, and the samples are reduced to one per
-20 seconds (averaged) for the chart: about 15 KB per hour of running. Runs saved
-before this are converted the same way the first time the server starts.
+The server keeps one sample per second for every run (roughly 200 KB per hour of
+running, so half an hour a day is under 50 MB a year). The fastest times are
+worked out from those when a run is saved; runs saved before this get theirs the
+first time the server starts. The chart is drawn from about 600 of the samples.
 
 ## What's measured
 

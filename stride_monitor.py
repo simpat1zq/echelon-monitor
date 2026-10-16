@@ -151,8 +151,7 @@ class RunStore:
         # Add columns introduced after the first release.
         for table, col, kind in (("runs", "calories", "INTEGER"), ("samples", "calories", "INTEGER"),
                                  ("runs", "user_id", "INTEGER"), ("runs", "bests", "TEXT"),
-                                 ("runs", "moved", "INTEGER"), ("runs", "original_user_id", "INTEGER"),
-                                 ("runs", "compacted", "INTEGER")):
+                                 ("runs", "moved", "INTEGER"), ("runs", "original_user_id", "INTEGER")):
             cols = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
             if col not in cols:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
@@ -160,16 +159,13 @@ class RunStore:
         # Finish runs left open by a crash or restart.
         for row in self.db.execute("SELECT id FROM runs WHERE ended IS NULL").fetchall():
             self.finish(row["id"])
-        # Runs saved before samples were compacted: work out their fastest times
-        # from the full-resolution samples, then compact them too.
+        # Runs saved before fastest times existed: work them out from their samples.
         old = self.db.execute("SELECT id, dist_unit FROM runs WHERE ended IS NOT NULL "
-                              "AND compacted IS NULL").fetchall()
+                              "AND bests IS NULL").fetchall()
         for row in old:
             self.save_bests(row["id"], row["dist_unit"])
-            self.compact(row["id"])
         if old:
-            log.info("Worked out fastest times for %d earlier run(s) and compacted their samples.", len(old))
-            self.db.execute("VACUUM")
+            log.info("Worked out fastest times for %d earlier run(s).", len(old))
 
     def start(self, started, dist_unit, user_id=None):
         cur = self.db.execute("INSERT INTO runs (started, dist_unit, user_id) VALUES (?, ?, ?)",
@@ -272,44 +268,19 @@ class RunStore:
                          r["elevation_ft"], r["avg_hr"], r["max_hr"], r["calories"] or None, run_id))
         unit = self.db.execute("SELECT dist_unit FROM runs WHERE id = ?", (run_id,)).fetchone()[0]
         self.save_bests(run_id, unit)
-        self.compact(run_id)
         return True
 
     # Distances for fastest times, in the run's unit.
     BEST_DISTANCES = {"mi": (0.25, 0.5, 1.0), "km": (0.5, 1.0, 5.0)}
-    COMPACT_SECONDS = 20  # stored sample spacing once a run is saved
+    CHART_POINTS = 600  # samples sent for a run's chart (it's stored at 1 per second)
 
     def save_bests(self, run_id, unit):
         """Fastest time over each of BEST_DISTANCES, from the run's 1-per-second samples."""
         points = [(r[0], r[1]) for r in self.db.execute(
             "SELECT t, distance FROM samples WHERE run_id = ? AND distance IS NOT NULL ORDER BY t", (run_id,))]
         bests = best_efforts(points, self.BEST_DISTANCES.get(unit or "mi", self.BEST_DISTANCES["mi"]))
-        self.db.execute("UPDATE runs SET bests = ? WHERE id = ?", (json.dumps(bests) if bests else None, run_id))
-        self.db.commit()
-
-    def compact(self, run_id):
-        """Replace a saved run's samples with one per COMPACT_SECONDS (averages), plenty for its chart."""
-        rows = self.db.execute("SELECT t, speed, incline, hr, distance, elevation_ft, calories FROM samples "
-                               "WHERE run_id = ? ORDER BY t", (run_id,)).fetchall()
-        buckets = collections.OrderedDict()
-        for r in rows:
-            buckets.setdefault(int((r["t"] - rows[0]["t"]) // self.COMPACT_SECONDS), []).append(r)
-
-        def avg(vals):
-            vals = [v for v in vals if v is not None]
-            return sum(vals) / len(vals) if vals else None
-
-        out = []
-        for group in buckets.values():
-            last = group[-1]
-            speed, incline, hr = (avg([g[k] for g in group]) for k in ("speed", "incline", "hr"))
-            out.append((run_id, group[0]["t"], None if speed is None else round(speed, 2),
-                        None if incline is None else round(incline, 1), None if hr is None else round(hr),
-                        last["distance"], last["elevation_ft"], last["calories"]))
-        self.db.execute("DELETE FROM samples WHERE run_id = ?", (run_id,))
-        self.db.executemany("INSERT INTO samples (run_id, t, speed, incline, hr, distance, elevation_ft, calories)"
-                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", out)
-        self.db.execute("UPDATE runs SET compacted = 1 WHERE id = ?", (run_id,))
+        # "{}" (none covered) rather than NULL, so it isn't worked out again at every start.
+        self.db.execute("UPDATE runs SET bests = ? WHERE id = ?", (json.dumps(bests), run_id))
         self.db.commit()
 
     def move_run(self, run_id, user_id):
@@ -341,13 +312,16 @@ class RunStore:
         for r in rows:
             r = dict(r)
             r["bests"] = json.loads(r["bests"]) if r["bests"] else None
+            r["bests"] = r["bests"] or None
             out.append(r)
         return out
 
     def samples(self, run_id):
-        rows = self.db.execute("SELECT t, speed, incline, hr FROM samples WHERE run_id = ? ORDER BY t",
-                               (run_id,))
-        return [dict(r) for r in rows]
+        """The run's samples for its chart, thinned to about CHART_POINTS."""
+        rows = [dict(r) for r in self.db.execute(
+            "SELECT t, speed, incline, hr FROM samples WHERE run_id = ? ORDER BY t", (run_id,))]
+        step = max(1, -(-len(rows) // self.CHART_POINTS))
+        return rows[::step] + ([rows[-1]] if rows and (len(rows) - 1) % step else [])
 
 
 def best_efforts(points, distances):
