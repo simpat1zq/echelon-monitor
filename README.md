@@ -142,9 +142,15 @@ face belongs to someone other than the selected runner, it asks whether to switc
 A run starts automatically when the belt starts moving. It ends when the belt has
 been stopped for 3 minutes (`--idle-timeout`), or when you tap **End run**. The
 idle stretch at the end isn't counted. Runs shorter than 30 seconds are
-discarded. Saved runs are listed at `/runs`, where you can tap a run to see its
-speed chart or delete it. Heart rate only appears once the treadmill reports
-one.
+discarded. Saved runs are listed at `/runs`. Tap a run to see its speed chart and
+fastest ¼, ½ and 1 mile (0.5, 1 and 5 km on metric), change who ran it, or delete
+it. A run moved to someone else shows ⇄; hover or tap it to see whose it was.
+The top of the page shows the fastest times for the person selected.
+
+While a run records, the server keeps one sample per second. When it's saved, the
+fastest times are worked out from those, and the samples are reduced to one per
+20 seconds (averaged) for the chart: about 15 KB per hour of running. Runs saved
+before this are converted the same way the first time the server starts.
 
 ## What's measured
 

@@ -150,7 +150,9 @@ class RunStore:
         """)
         # Add columns introduced after the first release.
         for table, col, kind in (("runs", "calories", "INTEGER"), ("samples", "calories", "INTEGER"),
-                                 ("runs", "user_id", "INTEGER")):
+                                 ("runs", "user_id", "INTEGER"), ("runs", "bests", "TEXT"),
+                                 ("runs", "moved", "INTEGER"), ("runs", "original_user_id", "INTEGER"),
+                                 ("runs", "compacted", "INTEGER")):
             cols = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
             if col not in cols:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
@@ -158,6 +160,16 @@ class RunStore:
         # Finish runs left open by a crash or restart.
         for row in self.db.execute("SELECT id FROM runs WHERE ended IS NULL").fetchall():
             self.finish(row["id"])
+        # Runs saved before samples were compacted: work out their fastest times
+        # from the full-resolution samples, then compact them too.
+        old = self.db.execute("SELECT id, dist_unit FROM runs WHERE ended IS NOT NULL "
+                              "AND compacted IS NULL").fetchall()
+        for row in old:
+            self.save_bests(row["id"], row["dist_unit"])
+            self.compact(row["id"])
+        if old:
+            log.info("Worked out fastest times for %d earlier run(s) and compacted their samples.", len(old))
+            self.db.execute("VACUUM")
 
     def start(self, started, dist_unit, user_id=None):
         cur = self.db.execute("INSERT INTO runs (started, dist_unit, user_id) VALUES (?, ?, ?)",
@@ -258,6 +270,59 @@ class RunStore:
             WHERE id = ?""",
                         (r["ended"], moving, distance, distance / (moving / 3600.0), r["max_speed"],
                          r["elevation_ft"], r["avg_hr"], r["max_hr"], r["calories"] or None, run_id))
+        unit = self.db.execute("SELECT dist_unit FROM runs WHERE id = ?", (run_id,)).fetchone()[0]
+        self.save_bests(run_id, unit)
+        self.compact(run_id)
+        return True
+
+    # Distances for fastest times, in the run's unit.
+    BEST_DISTANCES = {"mi": (0.25, 0.5, 1.0), "km": (0.5, 1.0, 5.0)}
+    COMPACT_SECONDS = 20  # stored sample spacing once a run is saved
+
+    def save_bests(self, run_id, unit):
+        """Fastest time over each of BEST_DISTANCES, from the run's 1-per-second samples."""
+        points = [(r[0], r[1]) for r in self.db.execute(
+            "SELECT t, distance FROM samples WHERE run_id = ? AND distance IS NOT NULL ORDER BY t", (run_id,))]
+        bests = best_efforts(points, self.BEST_DISTANCES.get(unit or "mi", self.BEST_DISTANCES["mi"]))
+        self.db.execute("UPDATE runs SET bests = ? WHERE id = ?", (json.dumps(bests) if bests else None, run_id))
+        self.db.commit()
+
+    def compact(self, run_id):
+        """Replace a saved run's samples with one per COMPACT_SECONDS (averages), plenty for its chart."""
+        rows = self.db.execute("SELECT t, speed, incline, hr, distance, elevation_ft, calories FROM samples "
+                               "WHERE run_id = ? ORDER BY t", (run_id,)).fetchall()
+        buckets = collections.OrderedDict()
+        for r in rows:
+            buckets.setdefault(int((r["t"] - rows[0]["t"]) // self.COMPACT_SECONDS), []).append(r)
+
+        def avg(vals):
+            vals = [v for v in vals if v is not None]
+            return sum(vals) / len(vals) if vals else None
+
+        out = []
+        for group in buckets.values():
+            last = group[-1]
+            speed, incline, hr = (avg([g[k] for g in group]) for k in ("speed", "incline", "hr"))
+            out.append((run_id, group[0]["t"], None if speed is None else round(speed, 2),
+                        None if incline is None else round(incline, 1), None if hr is None else round(hr),
+                        last["distance"], last["elevation_ft"], last["calories"]))
+        self.db.execute("DELETE FROM samples WHERE run_id = ?", (run_id,))
+        self.db.executemany("INSERT INTO samples (run_id, t, speed, incline, hr, distance, elevation_ft, calories)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", out)
+        self.db.execute("UPDATE runs SET compacted = 1 WHERE id = ?", (run_id,))
+        self.db.commit()
+
+    def move_run(self, run_id, user_id):
+        """Give a run to someone else, remembering whose it was first."""
+        r = self.db.execute("SELECT user_id, moved, original_user_id FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if r is None:
+            return False
+        if not r["moved"]:
+            self.db.execute("UPDATE runs SET moved = 1, original_user_id = user_id WHERE id = ?", (run_id,))
+        elif r["original_user_id"] == user_id:
+            # Back with its original runner: no longer a moved run.
+            self.db.execute("UPDATE runs SET moved = NULL, original_user_id = NULL WHERE id = ?", (run_id,))
+        self.db.execute("UPDATE runs SET user_id = ? WHERE id = ?", (user_id, run_id))
         self.db.commit()
         return True
 
@@ -268,15 +333,47 @@ class RunStore:
 
     def list_runs(self):
         rows = self.db.execute("""
-            SELECT runs.*, users.name AS user_name FROM runs
+            SELECT runs.*, users.name AS user_name, orig.name AS original_user_name FROM runs
             LEFT JOIN users ON users.id = runs.user_id
+            LEFT JOIN users AS orig ON orig.id = runs.original_user_id
             WHERE runs.ended IS NOT NULL ORDER BY runs.started DESC""")
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            r = dict(r)
+            r["bests"] = json.loads(r["bests"]) if r["bests"] else None
+            out.append(r)
+        return out
 
     def samples(self, run_id):
         rows = self.db.execute("SELECT t, speed, incline, hr FROM samples WHERE run_id = ? ORDER BY t",
                                (run_id,))
         return [dict(r) for r in rows]
+
+
+def best_efforts(points, distances):
+    """Fastest time (s) to cover each distance, from [(t, cumulative distance)] in time order.
+
+    Start times are interpolated between samples, so 1-per-second samples give
+    times to about a second. Distances the run never covered are left out.
+    """
+    out = {}
+    for target in distances:
+        best, j = None, 0
+        for i in range(1, len(points)):
+            t_end, d_end = points[i]
+            start = d_end - target
+            if start < points[0][1] - 0.001:  # allow ~5 ft of rounding on an exact-distance run
+                continue
+            start = max(start, points[0][1])
+            while j + 1 < i and points[j + 1][1] <= start:
+                j += 1
+            (t0, d0), (t1, d1) = points[j], points[j + 1]
+            t_start = t0 + (t1 - t0) * (start - d0) / (d1 - d0) if d1 > d0 else t0
+            if best is None or t_end - t_start < best:
+                best = t_end - t_start
+        if best is not None:
+            out[f"{target:g}"] = round(best, 1)
+    return out
 
 
 class FaceEngine:
@@ -1097,6 +1194,19 @@ def make_app(workout, ble=None, faces=None):
             raise web.HTTPNotFound()
         return web.json_response(workout.store.samples(int(request.match_info["run_id"])))
 
+    async def run_move(request):
+        """{"user_id": 3} (or null for no runner)."""
+        store = need_store()
+        run_id = int(request.match_info["run_id"])
+        if run_id == workout.run_id:
+            return web.json_response({"ok": False, "error": "run in progress"}, status=409)
+        user_id = (await request.json()).get("user_id")
+        if user_id is not None and not store.get_user(user_id):
+            raise web.HTTPNotFound(text="No such user.")
+        if not store.move_run(run_id, user_id):
+            raise web.HTTPNotFound()
+        return web.json_response({"ok": True})
+
     async def run_delete(request):
         if not workout.store:
             raise web.HTTPNotFound()
@@ -1157,6 +1267,7 @@ def make_app(workout, ble=None, faces=None):
     app.router.add_get("/api/runs", runs_api)
     app.router.add_get("/api/runs/{run_id:\\d+}/samples", run_samples)
     app.router.add_delete("/api/runs/{run_id:\\d+}", run_delete)
+    app.router.add_put("/api/runs/{run_id:\\d+}", run_move)
     app.router.add_get("/api/settings", settings_get)
     app.router.add_post("/api/settings", settings_set)
     app.router.add_get("/api/users", users_api)

@@ -13,7 +13,8 @@
 <style>
   :root {
     --bg: #0f1115; --card: #1a1d24; --text: #f2f4f8; --muted: #8b93a3;
-    --accent: #4fc3f7; --hr: #ff7070; --line: #2a2f3a; --bad: #ef5350; --ok: #66bb6a;
+    --accent: #4fc3f7; --line: #2a2f3a; --bad: #ef5350; --ok: #66bb6a;
+    --speed: #4fc3f7; --dist: #ffd54f; --hr: #80cbc4; --time: #81c784;
   }
   * { box-sizing: border-box; }
   body {
@@ -33,13 +34,21 @@
   .run { background: var(--card); border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; cursor: pointer; }
   .run-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
   .when { font-weight: 600; }
-  .dist { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent); white-space: nowrap; }
+  .dist { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--dist); white-space: nowrap; }
+  .moved { margin-left: 6px; color: var(--muted); cursor: help; font-size: 13px; }
+  .hint { font-size: 13px; color: var(--muted); margin: -6px 0 12px; }
+  .bests { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 12px; margin: 12px 0 4px; }
+  .bests .v { font-size: 18px; font-weight: 700; color: var(--time); font-variant-numeric: tabular-nums; }
+  .tile .num.best { color: var(--time); }
+  select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+           padding: 6px 10px; font-size: 14px; font-family: inherit; }
+  .actions label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; margin-right: auto; }
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px 12px; margin-top: 10px; }
   .stat .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .stat.hr .v { color: var(--hr); }
   .detail { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
   canvas { width: 100%; height: 130px; display: block; }
-  .actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+  .actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
   button { background: transparent; color: var(--bad); border: 1px solid #4a2b2b; border-radius: 8px; padding: 6px 12px; font-size: 13px; }
   .empty { color: var(--muted); text-align: center; padding: 40px 0; }
   [hidden] { display: none !important; }
@@ -60,6 +69,8 @@
   <div class="tile"><div class="label">Time</div><div class="num" id="tTime">0:00</div></div>
 </div>
 
+<div class="totals" id="bestTotals" hidden></div>
+<div class="hint" id="hint" hidden>Tap a run to see its chart and fastest times, change who ran it, or delete it.</div>
 <div id="list"><div class="empty">Loading…</div></div>
 
 <script>
@@ -95,19 +106,33 @@ function stat(label, value, unit, cls) {
   return s;
 }
 
+// Fastest-time distances, keyed as the server stores them, in the run's unit.
+const BEST_LABELS = { mi: [["0.25", "¼ mi"], ["0.5", "½ mi"], ["1", "1 mi"]],
+                      km: [["0.5", "0.5 km"], ["1", "1 km"], ["5", "5 km"]] };
+let users = [];
+
 function drawChart(canvas, samples) {
-  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth;
+  let h = canvas.clientHeight;
   canvas.width = w * dpr; canvas.height = h * dpr;
   const ctx = canvas.getContext("2d");
   ctx.scale(dpr, dpr);
   if (samples.length < 2) return;
   const t0 = samples[0].t, t1 = samples[samples.length - 1].t;
   const max = Math.max(4, ...samples.map((p) => p.speed)) * 1.1;
+  // Minutes along the bottom.
+  const mins = (t1 - t0) / 60, stepMin = [1, 2, 5, 10, 15, 30, 60].find((s) => mins / s <= 8) || 120;
+  ctx.fillStyle = "#8b93a3"; ctx.font = "11px system-ui";
+  for (let m = stepMin; m < mins; m += stepMin) {
+    const x = (m * 60 / (t1 - t0)) * w;
+    ctx.fillText(m + "m", x - 8, h - 2);
+  }
+  h -= 14;
   ctx.strokeStyle = "#2a2f3a"; ctx.fillStyle = "#8b93a3"; ctx.font = "11px system-ui"; ctx.lineWidth = 1;
   for (let v = 0; v <= max; v += max > 8 ? 2 : 1) {
     const y = h - (v / max) * h;
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-    ctx.fillText(v, 2, y - 2);
+    ctx.fillText(v, 2, y < 12 ? y + 11 : y - 2);
   }
   ctx.beginPath();
   samples.forEach((p, i) => {
@@ -117,13 +142,43 @@ function drawChart(canvas, samples) {
   ctx.strokeStyle = "#4fc3f7"; ctx.lineWidth = 2; ctx.stroke();
 }
 
+function bestsRow(bests, unit) {
+  const row = el("div", "bests");
+  for (const [key, label] of BEST_LABELS[unit] || BEST_LABELS.mi) {
+    const s = el("div", "stat");
+    s.append(el("div", "label", "Fastest " + label), el("div", "v", bests && bests[key] ? fmtTime(bests[key]) : "--"));
+    row.append(s);
+  }
+  return row;
+}
+
 async function toggleDetail(card, run) {
   const open = card.querySelector(".detail");
   if (open) { open.remove(); return; }
   const detail = el("div", "detail");
   const canvas = document.createElement("canvas");
   detail.append(el("div", "label", "Speed"), canvas);
+  if (run.bests) detail.append(bestsRow(run.bests, run.dist_unit));
   const actions = el("div", "actions");
+  if (users.length) {
+    const label = el("label", null, "Runner");
+    const pick = document.createElement("select");
+    for (const [id, name] of [[null, "No runner"], ...users.map((u) => [u.id, u.name])]) {
+      const o = el("option", null, name);
+      o.value = id ?? "";
+      o.selected = (run.user_id ?? null) === id;
+      pick.append(o);
+    }
+    pick.onchange = async () => {
+      const id = pick.value === "" ? null : Number(pick.value);
+      const r = await fetch("/api/runs/" + run.id, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user_id: id }),
+      });
+      if (r.ok) load();
+    };
+    label.append(pick);
+    actions.append(label);
+  }
   const del = el("button", null, "Delete run");
   del.onclick = async (e) => {
     e.stopPropagation();
@@ -162,8 +217,26 @@ function renderFilters(all) {
   for (const [key, label] of people) chip(key, label);
 }
 
+function renderBests(runs, unit) {
+  const box = $("bestTotals");
+  box.textContent = "";
+  let any = false;
+  for (const [key, label] of BEST_LABELS[unit] || BEST_LABELS.mi) {
+    const times = runs.filter((r) => (r.dist_unit || unit) === unit && r.bests && r.bests[key]).map((r) => r.bests[key]);
+    if (times.length) any = true;
+    const tile = el("div", "tile");
+    tile.append(el("div", "label", "Fastest " + label), el("div", "num best", times.length ? fmtTime(Math.min(...times)) : "--"));
+    box.append(tile);
+  }
+  box.hidden = !any;
+}
+
 async function load() {
-  const data = await (await fetch("/api/runs")).json();
+  const [data, u] = await Promise.all([
+    (await fetch("/api/runs")).json(),
+    fetch("/api/users").then((r) => r.json()).catch(() => ({ users: [] })),
+  ]);
+  users = u.users || [];
   const list = $("list");
   list.textContent = "";
   if (!data.history) {
@@ -172,7 +245,8 @@ async function load() {
   }
   renderFilters(data.runs);
   const runs = data.runs.filter((r) => filter === "all" || String(r.user_id ?? "none") === filter);
-  $("totals").hidden = !runs.length;
+  $("totals").hidden = $("hint").hidden = !runs.length;
+  $("bestTotals").hidden = true;
   if (!runs.length) {
     list.append(el("div", "empty", data.runs.length ? "No runs for this person yet."
       : "No runs yet. Runs are saved automatically when the belt stops for 3 minutes."));
@@ -184,13 +258,24 @@ async function load() {
   $("tDist").textContent = runs.reduce((a, r) => a + (r.distance || 0), 0).toFixed(1);
   $("tDistUnit").textContent = unit;
   $("tTime").textContent = fmtTime(runs.reduce((a, r) => a + (r.moving_s || 0), 0));
+  renderBests(runs, unit);
 
   for (const r of runs) {
     const card = el("div", "run");
     const head = el("div", "run-head");
     const left = el("div");
     left.append(el("div", "when", fmtWhen(r.started)));
-    if (r.user_name) left.append(el("div", "who", r.user_name));
+    if (r.user_name || r.moved) {
+      const who = el("div", "who", r.user_name || "No runner");
+      if (r.moved) {
+        const from = r.original_user_name || (r.original_user_id == null ? "no runner" : "a deleted user");
+        const icon = el("span", "moved", "⇄");
+        icon.title = "Moved from " + from;
+        icon.onclick = (e) => { e.stopPropagation(); alert("This run was moved here from " + from + "."); };
+        who.append(icon);
+      }
+      left.append(who);
+    }
     head.append(left);
     const dist = el("div", "dist", (r.distance || 0).toFixed(2));
     dist.append(el("span", "unit", r.dist_unit || unit));
@@ -203,6 +288,7 @@ async function load() {
     stats.append(stat("Climb", Math.round(r.elevation_ft || 0), "ft"));
     if (r.calories) stats.append(stat("Calories", r.calories, "kcal"));
     if (r.avg_hr) stats.append(stat("Avg HR", Math.round(r.avg_hr), "bpm", "hr"));
+    if (r.bests && r.bests["1"]) stats.append(stat("Fastest " + (r.dist_unit === "km" ? "km" : "mile"), fmtTime(r.bests["1"])));
     card.append(head, stats);
     card.onclick = () => toggleDetail(card, r);
     list.append(card);
