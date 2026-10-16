@@ -31,7 +31,12 @@
   .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
   .num { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .unit { font-size: 13px; color: var(--muted); font-weight: 500; margin-left: 3px; }
-  .run { background: var(--card); border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; cursor: pointer; }
+  .run { background: var(--card); border-radius: 14px; padding: 14px 16px 22px; margin-bottom: 10px; cursor: pointer;
+         position: relative; }
+  .chev { position: absolute; right: 14px; bottom: 4px; color: var(--muted); font-size: 14px; line-height: 1;
+          transition: transform .15s; }
+  .run.open .chev { transform: rotate(180deg); }
+  a.pill { text-decoration: none; }
   .run-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
   .when { font-weight: 600; }
   .dist { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--dist); white-space: nowrap; }
@@ -43,7 +48,7 @@
   select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
            padding: 6px 10px; font-size: 14px; font-family: inherit; }
   .actions label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; margin-right: auto; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px 12px; margin-top: 10px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px 12px; margin-top: 10px; }
   .stat .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .stat.hr .v { color: var(--hr); }
   .detail { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
@@ -59,6 +64,7 @@
 <header class="topbar">
   <button class="menu-btn" id="menuBtn" aria-label="Menu">☰</button>
   <div class="title"><h1>Runs</h1></div>
+  <a class="pill" href="/">← Live</a>
 </header>
 
 <div class="filters" id="filters" hidden></div>
@@ -154,6 +160,7 @@ function bestsRow(bests, unit) {
 
 async function toggleDetail(card, run) {
   const open = card.querySelector(".detail");
+  card.classList.toggle("open", !open);
   if (open) { open.remove(); return; }
   const detail = el("div", "detail");
   const canvas = document.createElement("canvas");
@@ -288,8 +295,7 @@ async function load() {
     stats.append(stat("Climb", Math.round(r.elevation_ft || 0), "ft"));
     if (r.calories) stats.append(stat("Calories", r.calories, "kcal"));
     if (r.avg_hr) stats.append(stat("Avg HR", Math.round(r.avg_hr), "bpm", "hr"));
-    if (r.bests && r.bests["1"]) stats.append(stat("Fastest " + (r.dist_unit === "km" ? "km" : "mile"), fmtTime(r.bests["1"])));
-    card.append(head, stats);
+    card.append(head, stats, el("span", "chev", "▼"));
     card.onclick = () => toggleDetail(card, r);
     list.append(card);
   }
