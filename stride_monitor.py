@@ -397,13 +397,15 @@ class Charger:
     async def switch(self, on):
         if not self.configured or (on == self.on and time.time() - self.sent < self.RESEND):
             return
-        domain = self.entity.split(".", 1)[0]
+        # One entity, or several separated by commas (e.g. both sockets of a plug).
+        entities = [e.strip() for e in self.entity.split(",") if e.strip()]
+        domain = entities[0].split(".", 1)[0]
         url = f"{self.url}/api/services/{domain}/turn_{'on' if on else 'off'}"
         try:
             import aiohttp
 
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as http:
-                async with http.post(url, json={"entity_id": self.entity},
+                async with http.post(url, json={"entity_id": entities},
                                      headers={"Authorization": f"Bearer {self.token}"}) as r:
                     if r.status >= 300:
                         raise RuntimeError(f"Home Assistant said {r.status}: {(await r.text())[:200]}")
@@ -1443,7 +1445,8 @@ def main():
     p.add_argument("--ha-token", default=os.environ.get("HA_TOKEN"),
                    help="Home Assistant long-lived access token (better passed as HA_TOKEN)")
     p.add_argument("--ha-switch", default=os.environ.get("HA_SWITCH"),
-                   help="entity that powers the tablet's charger, e.g. switch.tablet_charger (or HA_SWITCH)")
+                   help="entity (or comma-separated entities) powering the tablet's charger, "
+                        "e.g. switch.tablet_charger (or HA_SWITCH)")
     p.add_argument("--csv", help="also append per-second samples to this CSV file")
     p.add_argument("--demo", action="store_true", help="generate fake data (no treadmill needed)")
     p.add_argument("--scan", action="store_true", help="list nearby BLE devices and exit")

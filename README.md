@@ -136,7 +136,7 @@ environment):
 | --- | --- |
 | `HA_URL` | `http://192.168.1.10:8123` (reachable from the server) |
 | `HA_TOKEN` | a long-lived access token (HA: your profile → Security) |
-| `HA_SWITCH` | `switch.tablet_charger` (the plug's entity ID) |
+| `HA_SWITCH` | `switch.tablet_charger` (the plug's entity ID; separate several with commas to switch them together) |
 
 Then **Charging** appears in the menu, showing the tablet's level; tap it to change
 the range. If the tablet stops reporting for 15 minutes, the plug is switched on
