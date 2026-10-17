@@ -122,6 +122,26 @@ The light in the header is green while the treadmill is connected.
   after 5 minutes without a connection, at most once every 30 minutes (Android 9
   and older; newer Android doesn't let apps switch Wi-Fi).
 
+## Tablet charging
+
+To keep the tablet's battery between two levels (50–75% by default) instead of
+at 100%, put its charger on a smart plug that Home Assistant can switch. The
+Android app reports the battery level every minute; the server switches the plug
+on at or below the low level and off at or above the high level.
+
+Set three environment variables on the container (in Komodo, the stack's
+environment):
+
+| Variable | Example |
+| --- | --- |
+| `HA_URL` | `http://192.168.1.10:8123` (reachable from the server) |
+| `HA_TOKEN` | a long-lived access token (HA: your profile → Security) |
+| `HA_SWITCH` | `switch.tablet_charger` (the plug's entity ID) |
+
+Then **Charging** appears in the menu, showing the tablet's level; tap it to change
+the range. If the tablet stops reporting for 15 minutes, the plug is switched on
+so it can't run flat. The app reports while the overlay or wake on motion is on.
+
 ## Face recognition
 
 On the **Users** page, tap **Face** next to a user and take a few photos while

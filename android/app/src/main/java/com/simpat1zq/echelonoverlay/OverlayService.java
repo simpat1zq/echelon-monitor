@@ -143,6 +143,7 @@ public class OverlayService extends Service {
         poller = Executors.newSingleThreadScheduledExecutor();
         poller.scheduleWithFixedDelay(this::poll, 0, 1, TimeUnit.SECONDS);
         WifiWatchdog.start(this);
+        BatteryReporter.start(this);
     }
 
     @Override
@@ -160,6 +161,7 @@ public class OverlayService extends Service {
         running = false;
         instance = null;
         WifiWatchdog.stop();
+        BatteryReporter.stop();
         if (poller != null) poller.shutdownNow();
         if (box != null) {
             try {

@@ -159,9 +159,10 @@ class RunStore:
         # Finish runs left open by a crash or restart.
         for row in self.db.execute("SELECT id FROM runs WHERE ended IS NULL").fetchall():
             self.finish(row["id"])
-        # Runs saved before fastest times existed: work them out from their samples.
-        old = self.db.execute("SELECT id, dist_unit FROM runs WHERE ended IS NOT NULL "
-                              "AND bests IS NULL").fetchall()
+        # Runs saved before fastest times existed, or before they recorded where in
+        # the run they happened: work them out from their samples.
+        old = [r for r in self.db.execute("SELECT id, dist_unit, bests FROM runs WHERE ended IS NOT NULL")
+               if r["bests"] is None or any(not isinstance(v, list) for v in json.loads(r["bests"]).values())]
         for row in old:
             self.save_bests(row["id"], row["dist_unit"])
         if old:
@@ -325,14 +326,15 @@ class RunStore:
 
 
 def best_efforts(points, distances):
-    """Fastest time (s) to cover each distance, from [(t, cumulative distance)] in time order.
+    """Fastest stretch for each distance, from [(t, cumulative distance)] in time order.
 
-    Start times are interpolated between samples, so 1-per-second samples give
-    times to about a second. Distances the run never covered are left out.
+    Returns {"0.25": [seconds, start_t, end_t], ...}. Start times are interpolated
+    between samples, so 1-per-second samples give times to about a second.
+    Distances the run never covered are left out.
     """
     out = {}
     for target in distances:
-        best, j = None, 0
+        best, span, j = None, None, 0
         for i in range(1, len(points)):
             t_end, d_end = points[i]
             start = d_end - target
@@ -344,10 +346,82 @@ def best_efforts(points, distances):
             (t0, d0), (t1, d1) = points[j], points[j + 1]
             t_start = t0 + (t1 - t0) * (start - d0) / (d1 - d0) if d1 > d0 else t0
             if best is None or t_end - t_start < best:
-                best = t_end - t_start
+                best, span = t_end - t_start, (t_start, t_end)
         if best is not None:
-            out[f"{target:g}"] = round(best, 1)
+            out[f"{target:g}"] = [round(best, 1), round(span[0], 1), round(span[1], 1)]
     return out
+
+
+class Charger:
+    """Keeps the tablet's battery between two levels by switching its USB plug.
+
+    The Android app reports the battery level every minute. At or below the low
+    level the plug is switched on through Home Assistant, at or above the high
+    level off; in between it's left alone. If reports stop for STALE seconds
+    (app closed, tablet asleep without the app), the plug is switched on so the
+    tablet can't run flat.
+    """
+
+    STALE = 15 * 60
+    RESEND = 10 * 60  # repeat the last command this often, in case the plug was switched by hand
+
+    def __init__(self, url, token, entity, levels):
+        self.url, self.token, self.entity = (url or "").rstrip("/"), token, entity
+        self.levels = levels  # () -> (low, high)
+        self.level = self.charging = None
+        self.reported = 0.0
+        self.on = None        # what we last told the plug
+        self.sent = 0.0
+        self.error = None
+
+    @property
+    def configured(self):
+        return bool(self.url and self.token and self.entity)
+
+    def status(self):
+        low, high = self.levels()
+        return {"configured": self.configured, "battery": self.level, "charging": self.charging,
+                "plug_on": self.on, "low": low, "high": high, "error": self.error,
+                "reported_ago": None if not self.reported else int(time.time() - self.reported)}
+
+    async def report(self, level, charging):
+        self.level, self.charging, self.reported = level, charging, time.time()
+        low, high = self.levels()
+        if level <= low:
+            await self.switch(True)
+        elif level >= high:
+            await self.switch(False)
+        elif self.on is not None:
+            await self.switch(self.on)  # in between: keep (and re-assert) what it was doing
+
+    async def switch(self, on):
+        if not self.configured or (on == self.on and time.time() - self.sent < self.RESEND):
+            return
+        domain = self.entity.split(".", 1)[0]
+        url = f"{self.url}/api/services/{domain}/turn_{'on' if on else 'off'}"
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as http:
+                async with http.post(url, json={"entity_id": self.entity},
+                                     headers={"Authorization": f"Bearer {self.token}"}) as r:
+                    if r.status >= 300:
+                        raise RuntimeError(f"Home Assistant said {r.status}: {(await r.text())[:200]}")
+        except Exception as exc:  # noqa: BLE001
+            if self.error != str(exc):
+                log.warning("Couldn't switch the tablet charger: %s", exc)
+            self.error = str(exc)
+            return
+        if on != self.on:
+            log.info("Tablet battery %s%%: charger %s.", self.level, "on" if on else "off")
+        self.on, self.sent, self.error = on, time.time(), None
+
+    async def watch(self):
+        while True:
+            await asyncio.sleep(60)
+            if self.reported and time.time() - self.reported > self.STALE and self.on is not True:
+                log.info("No battery report from the tablet for %d min; charger on to be safe.", self.STALE // 60)
+                await self.switch(True)
 
 
 class FaceEngine:
@@ -985,7 +1059,7 @@ async def csv_logger(workout, path):
                 fh.flush()
 
 
-def make_app(workout, ble=None, faces=None):
+def make_app(workout, ble=None, faces=None, charger=None):
     clients = set()
 
     def page(name):
@@ -1036,15 +1110,19 @@ def make_app(workout, ble=None, faces=None):
         return {"name": name[:60], "weight_kg": num("weight_kg"), "height_cm": num("height_cm"),
                 "age": num("age", int), "sex": sex}
 
-    defaults = {"screen_timeout_min": 5}
+    defaults = {"screen_timeout_min": 5, "battery_low": 50, "battery_high": 75}
 
     def current_settings():
         out = dict(defaults)
         if workout.store:
-            v = workout.store.get_setting("screen_timeout_min")
-            if v:
-                out["screen_timeout_min"] = int(v)
+            for key in defaults:
+                v = workout.store.get_setting(key)
+                if v:
+                    out[key] = int(v)
         return out
+
+    if charger:
+        charger.levels = lambda: (current_settings()["battery_low"], current_settings()["battery_high"])
 
     async def settings_get(_request):
         return web.json_response(current_settings())
@@ -1060,7 +1138,32 @@ def make_app(workout, ble=None, faces=None):
             if not 1 <= minutes <= 1440:
                 raise web.HTTPBadRequest(text="screen_timeout_min must be between 1 and 1440.")
             store.set_setting("screen_timeout_min", str(minutes))
+        if "battery_low" in data or "battery_high" in data:
+            cur = current_settings()
+            try:
+                low = int(data.get("battery_low", cur["battery_low"]))
+                high = int(data.get("battery_high", cur["battery_high"]))
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text="Battery levels must be whole numbers.")
+            if not 5 <= low <= high - 5 or high > 100:
+                raise web.HTTPBadRequest(text="Use a low level of at least 5% and a high level at least 5% above it.")
+            store.set_setting("battery_low", str(low))
+            store.set_setting("battery_high", str(high))
         return web.json_response(current_settings())
+
+    async def tablet_report(request):
+        """The Android app's battery report: {"battery": 63, "charging": true}."""
+        data = await request.json()
+        try:
+            level = int(data["battery"])
+        except (KeyError, TypeError, ValueError):
+            raise web.HTTPBadRequest(text="battery must be a number.")
+        if charger:
+            await charger.report(level, bool(data.get("charging")))
+        return web.json_response(charger.status() if charger else {"configured": False})
+
+    async def charger_status(_request):
+        return web.json_response(charger.status() if charger else {"configured": False})
 
     async def users_api(_request):
         if not workout.store:
@@ -1252,6 +1355,8 @@ def make_app(workout, ble=None, faces=None):
     app.router.add_post("/api/users/{user_id:\\d+}/face", face_add)
     app.router.add_delete("/api/users/{user_id:\\d+}/face", face_clear)
     app.router.add_post("/api/identify", identify)
+    app.router.add_post("/api/tablet", tablet_report)
+    app.router.add_get("/api/charger", charger_status)
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/{name:[A-Za-z0-9._-]+}", static_file)
     app.cleanup_ctx.append(broadcaster)
@@ -1279,7 +1384,10 @@ async def main_async(args):
         ble = StrideBLE(workout, args.address, args.name, args.debug, args.protocol,
                         args.disconnect_on_exit)
     faces = FaceEngine.load(args.face_models) if store else None
-    runner = web.AppRunner(make_app(workout, ble, faces))
+    charger = Charger(args.ha_url, args.ha_token, args.ha_switch, lambda: (50, 75))
+    if charger.configured:
+        log.info("Tablet charger: %s through Home Assistant at %s.", args.ha_switch, args.ha_url)
+    runner = web.AppRunner(make_app(workout, ble, faces, charger))
     await runner.setup()
     await web.TCPSite(runner, args.host, args.port).start()
     log.info("Echelon Monitor version %s%s", APP_VERSION[:7],
@@ -1293,6 +1401,8 @@ async def main_async(args):
         tasks.append(asyncio.create_task(ble.run_forever()))
     if args.csv:
         tasks.append(asyncio.create_task(csv_logger(workout, args.csv)))
+    if charger.configured:
+        tasks.append(asyncio.create_task(charger.watch()))
 
     # docker stop sends SIGTERM, which a Python PID 1 otherwise ignores until
     # it's SIGKILLed. Cancel the tasks instead so BleakClient disconnects
@@ -1328,6 +1438,12 @@ def main():
                    help="end a run after this many seconds without movement (default 180)")
     p.add_argument("--face-models", default=os.path.join(HERE, "models"),
                    help="folder with the YuNet and SFace face models (face recognition is off without them)")
+    p.add_argument("--ha-url", default=os.environ.get("HA_URL"),
+                   help="Home Assistant URL, e.g. http://192.168.1.10:8123 (or HA_URL), for the tablet charger")
+    p.add_argument("--ha-token", default=os.environ.get("HA_TOKEN"),
+                   help="Home Assistant long-lived access token (better passed as HA_TOKEN)")
+    p.add_argument("--ha-switch", default=os.environ.get("HA_SWITCH"),
+                   help="entity that powers the tablet's charger, e.g. switch.tablet_charger (or HA_SWITCH)")
     p.add_argument("--csv", help="also append per-second samples to this CSV file")
     p.add_argument("--demo", action="store_true", help="generate fake data (no treadmill needed)")
     p.add_argument("--scan", action="store_true", help="list nearby BLE devices and exit")

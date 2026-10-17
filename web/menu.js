@@ -109,7 +109,29 @@
     lastActive = Date.now();
     updateAwake();
   };
-  drawer.append(overlay, motion, fs, timeoutItem, apk, update, server, link("/debug", "Debug", "muted-link"));
+  // Tablet charging range (only when the server can switch the charger through Home Assistant).
+  const chargeItem = el("button", "item");
+  chargeItem.hidden = true;
+  const showCharger = (c) => {
+    chargeItem.hidden = !c.configured;
+    chargeItem.textContent = `Charging: ${c.low}–${c.high}%` + (c.battery != null ? ` · tablet at ${c.battery}%` : "");
+    chargeItem.title = c.error || "";
+  };
+  fetch("/api/charger").then((r) => r.json()).then(showCharger).catch(() => {});
+  chargeItem.onclick = async () => {
+    const c = await (await fetch("/api/charger")).json();
+    const v = prompt("Keep the tablet's battery between (low-high %):", `${c.low}-${c.high}`);
+    if (v == null) return;
+    const m = v.match(/(\d+)\D+(\d+)/);
+    if (!m) { alert("Enter two numbers, like 50-75."); return; }
+    const r = await fetch("/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ battery_low: Number(m[1]), battery_high: Number(m[2]) }),
+    });
+    if (!r.ok) { alert(await r.text()); return; }
+    showCharger(await (await fetch("/api/charger")).json());
+  };
+  drawer.append(overlay, motion, fs, timeoutItem, chargeItem, apk, update, server, link("/debug", "Debug", "muted-link"));
 
   document.body.append(scrim, drawer);
   const open = () => {

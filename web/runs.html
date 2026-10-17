@@ -44,6 +44,8 @@
   .hint { font-size: 13px; color: var(--muted); margin: -6px 0 12px; }
   .bests { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 12px; margin: 12px 0 4px; }
   .bests .v { font-size: 18px; font-weight: 700; color: var(--time); font-variant-numeric: tabular-nums; }
+  .bests .label::before { content: ""; display: inline-block; width: 12px; height: 4px; border-radius: 2px;
+                          background: var(--c); margin-right: 6px; vertical-align: middle; }
   .tile .num.best { color: var(--time); }
   select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
            padding: 6px 10px; font-size: 14px; font-family: inherit; }
@@ -52,7 +54,7 @@
   .stat .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .stat.hr .v { color: var(--hr); }
   .detail { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
-  canvas { width: 100%; height: 130px; display: block; }
+  canvas { width: 100%; height: 160px; display: block; }
   .actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
   button { background: transparent; color: var(--bad); border: 1px solid #4a2b2b; border-radius: 8px; padding: 6px 12px; font-size: 13px; }
   .empty { color: var(--muted); text-align: center; padding: 40px 0; }
@@ -115,9 +117,12 @@ function stat(label, value, unit, cls) {
 // Fastest-time distances, keyed as the server stores them, in the run's unit.
 const BEST_LABELS = { mi: [["0.25", "¼ mi"], ["0.5", "½ mi"], ["1", "1 mi"]],
                       km: [["0.5", "0.5 km"], ["1", "1 km"], ["5", "5 km"]] };
+// Each fastest-time distance gets a colour, used for its bar under the chart.
+const BEST_COLORS = ["#ce93d8", "#ffb74d", "#81c784"];
+const bestSecs = (v) => (Array.isArray(v) ? v[0] : v);  // [seconds, start_t, end_t]
 let users = [];
 
-function drawChart(canvas, samples) {
+function drawChart(canvas, samples, bests, unit) {
   const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth;
   let h = canvas.clientHeight;
   canvas.width = w * dpr; canvas.height = h * dpr;
@@ -126,6 +131,15 @@ function drawChart(canvas, samples) {
   if (samples.length < 2) return;
   const t0 = samples[0].t, t1 = samples[samples.length - 1].t;
   const max = Math.max(4, ...samples.map((p) => p.speed)) * 1.1;
+  // Fastest stretches: one thin bar per distance along the very bottom.
+  const spans = (BEST_LABELS[unit] || BEST_LABELS.mi)
+    .map(([key], i) => [bests && bests[key], BEST_COLORS[i]]).filter(([v]) => Array.isArray(v));
+  spans.forEach(([v, color], i) => {
+    const y = h - (spans.length - i) * 7, a = ((v[1] - t0) / (t1 - t0)) * w, b = ((v[2] - t0) / (t1 - t0)) * w;
+    ctx.fillStyle = color;
+    ctx.fillRect(a, y, Math.max(2, b - a), 4);
+  });
+  h -= spans.length * 7 + (spans.length ? 4 : 0);
   // Minutes along the bottom.
   const mins = (t1 - t0) / 60, stepMin = [1, 2, 5, 10, 15, 30, 60].find((s) => mins / s <= 8) || 120;
   ctx.fillStyle = "#8b93a3"; ctx.font = "11px system-ui";
@@ -150,11 +164,12 @@ function drawChart(canvas, samples) {
 
 function bestsRow(bests, unit) {
   const row = el("div", "bests");
-  for (const [key, label] of BEST_LABELS[unit] || BEST_LABELS.mi) {
+  (BEST_LABELS[unit] || BEST_LABELS.mi).forEach(([key, label], i) => {
     const s = el("div", "stat");
-    s.append(el("div", "label", "Fastest " + label), el("div", "v", bests && bests[key] ? fmtTime(bests[key]) : "--"));
+    s.style.setProperty("--c", BEST_COLORS[i]);
+    s.append(el("div", "label", "Fastest " + label), el("div", "v", bests && bests[key] ? fmtTime(bestSecs(bests[key])) : "--"));
     row.append(s);
-  }
+  });
   return row;
 }
 
@@ -198,7 +213,7 @@ async function toggleDetail(card, run) {
   detail.onclick = (e) => e.stopPropagation();
   card.append(detail);
   const samples = await (await fetch("/api/runs/" + run.id + "/samples")).json();
-  drawChart(canvas, samples);
+  drawChart(canvas, samples, run.bests, run.dist_unit || "mi");
 }
 
 let filter = "all";
@@ -229,7 +244,7 @@ function renderBests(runs, unit) {
   box.textContent = "";
   let any = false;
   for (const [key, label] of BEST_LABELS[unit] || BEST_LABELS.mi) {
-    const times = runs.filter((r) => (r.dist_unit || unit) === unit && r.bests && r.bests[key]).map((r) => r.bests[key]);
+    const times = runs.filter((r) => (r.dist_unit || unit) === unit && r.bests && r.bests[key]).map((r) => bestSecs(r.bests[key]));
     if (times.length) any = true;
     const tile = el("div", "tile");
     tile.append(el("div", "label", "Fastest " + label), el("div", "num best", times.length ? fmtTime(Math.min(...times)) : "--"));

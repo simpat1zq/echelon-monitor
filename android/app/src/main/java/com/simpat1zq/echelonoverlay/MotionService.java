@@ -94,6 +94,7 @@ public class MotionService extends Service {
         registerReceiver(screen, f);
         watch(!pm.isInteractive());
         WifiWatchdog.start(this);
+        BatteryReporter.start(this);
     }
 
     @Override
@@ -109,6 +110,7 @@ public class MotionService extends Service {
     public void onDestroy() {
         running = false;
         WifiWatchdog.stop();
+        BatteryReporter.stop();
         unregisterReceiver(screen);
         bg.removeCallbacks(reopen);
         bg.post(this::closeCamera);
