@@ -4,6 +4,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.BatteryManager;
+import android.os.Build;
+import android.provider.Settings;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -29,6 +31,11 @@ final class BatteryReporter {
     private static int users;
 
     private BatteryReporter() {
+    }
+
+    /** Identifies this device to the server, which only acts on the chosen device's reports. */
+    static String deviceId(Context context) {
+        return Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID);
     }
 
     /** Call from a service's onCreate (main thread). */
@@ -58,7 +65,9 @@ final class BatteryReporter {
             JSONObject body = new JSONObject()
                     .put("battery", Math.round(level * 100f / scale))
                     .put("charging", status == BatteryManager.BATTERY_STATUS_CHARGING
-                            || status == BatteryManager.BATTERY_STATUS_FULL);
+                            || status == BatteryManager.BATTERY_STATUS_FULL)
+                    .put("device", deviceId(app))
+                    .put("name", Build.MANUFACTURER + " " + Build.MODEL);
             String base = app.getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE)
                     .getString(MainActivity.KEY_URL, MainActivity.DEFAULT_URL);
             HttpURLConnection c = (HttpURLConnection) new URL(base + "/api/tablet").openConnection();

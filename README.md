@@ -138,8 +138,10 @@ environment):
 | `HA_TOKEN` | a long-lived access token (HA: your profile → Security) |
 | `HA_SWITCH` | `switch.tablet_charger` (the plug's entity ID; separate several with commas to switch them together) |
 
-Then **Charging** appears in the menu, showing the tablet's level; tap it to change
-the range. If the tablet stops reporting for 15 minutes, the plug is switched on
+Then **Charging** appears in the menu. Open the menu in the app **on the treadmill's
+tablet** and tap it once to make that tablet the one the charger follows (the
+app on a phone reports its battery too, and is ignored). After that it shows the
+tablet's level; tap it to change the range. If the tablet stops reporting for 15 minutes, the plug is switched on
 so it can't run flat. The app reports while the overlay or wake on motion is on.
 
 ## Face recognition

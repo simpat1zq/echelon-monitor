@@ -112,14 +112,29 @@
   // Tablet charging range (only when the server can switch the charger through Home Assistant).
   const chargeItem = el("button", "item");
   chargeItem.hidden = true;
+  // Only the chosen device's battery counts (the app on a phone reports too).
+  const myDevice = app && app.deviceId ? app.deviceId() : null;
   const showCharger = (c) => {
     chargeItem.hidden = !c.configured;
-    chargeItem.textContent = `Charging: ${c.low}–${c.high}%` + (c.battery != null ? ` · tablet at ${c.battery}%` : "");
+    if (!c.device) chargeItem.textContent = myDevice ? "Charging: tap to use this tablet" : "Charging: choose the tablet in its app";
+    else if (myDevice && c.device !== myDevice) chargeItem.textContent = `Charging follows ${c.device_name || "another device"}`;
+    else chargeItem.textContent = `Charging: ${c.low}–${c.high}%` + (c.battery != null ? ` · tablet at ${c.battery}%` : "");
     chargeItem.title = c.error || "";
   };
   fetch("/api/charger").then((r) => r.json()).then(showCharger).catch(() => {});
   chargeItem.onclick = async () => {
-    const c = await (await fetch("/api/charger")).json();
+    let c = await (await fetch("/api/charger")).json();
+    if (myDevice && c.device !== myDevice) {
+      const msg = c.device
+        ? `The charger follows ${c.device_name || "another device"}. Follow this device's battery instead?`
+        : "Use this device's battery to switch the charger? Do this on the treadmill's tablet, not your phone.";
+      if (!confirm(msg)) return;
+      c = await (await fetch("/api/charger/device", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: myDevice }),
+      })).json();
+      showCharger(c);
+      return;
+    }
     const v = prompt("Keep the tablet's battery between (low-high %):", `${c.low}-${c.high}`);
     if (v == null) return;
     const m = v.match(/(\d+)\D+(\d+)/);

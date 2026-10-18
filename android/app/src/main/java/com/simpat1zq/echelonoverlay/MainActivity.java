@@ -358,6 +358,11 @@ public class MainActivity extends Activity {
     /** Called from the page's JavaScript (menu.js). */
     private class Bridge {
         @JavascriptInterface
+        public String deviceId() {
+            return BatteryReporter.deviceId(MainActivity.this);
+        }
+
+        @JavascriptInterface
         public boolean overlayRunning() {
             return OverlayService.running;
         }

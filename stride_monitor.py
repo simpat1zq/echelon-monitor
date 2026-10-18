@@ -360,6 +360,9 @@ class Charger:
     level off; in between it's left alone. If reports stop for STALE seconds
     (app closed, tablet asleep without the app), the plug is switched on so the
     tablet can't run flat.
+
+    Every device running the app reports (a phone too), so only reports from the
+    device chosen in the menu ("Use this device for charging") count.
     """
 
     STALE = 15 * 60
@@ -368,6 +371,9 @@ class Charger:
     def __init__(self, url, token, entity, levels):
         self.url, self.token, self.entity = (url or "").rstrip("/"), token, entity
         self.levels = levels  # () -> (low, high)
+        self.get_device = lambda: None   # set by make_app: the chosen device's ID, kept in settings
+        self.set_device = lambda device: None
+        self.names = {}                  # device ID -> "Manufacturer Model", from reports
         self.level = self.charging = None
         self.reported = 0.0
         self.on = None        # what we last told the plug
@@ -380,11 +386,17 @@ class Charger:
 
     def status(self):
         low, high = self.levels()
-        return {"configured": self.configured, "battery": self.level, "charging": self.charging,
+        device = self.get_device()
+        return {"configured": self.configured, "device": device, "device_name": self.names.get(device),
+                "battery": self.level, "charging": self.charging,
                 "plug_on": self.on, "low": low, "high": high, "error": self.error,
                 "reported_ago": None if not self.reported else int(time.time() - self.reported)}
 
-    async def report(self, level, charging):
+    async def report(self, level, charging, device=None, name=None):
+        if device and name:
+            self.names[device] = name
+        if not device or device != self.get_device():
+            return  # not the treadmill's tablet (or none chosen yet)
         self.level, self.charging, self.reported = level, charging, time.time()
         low, high = self.levels()
         if level <= low:
@@ -1125,6 +1137,13 @@ def make_app(workout, ble=None, faces=None, charger=None):
 
     if charger:
         charger.levels = lambda: (current_settings()["battery_low"], current_settings()["battery_high"])
+        if workout.store:
+            charger.get_device = lambda: workout.store.get_setting("charger_device")
+            charger.set_device = lambda device: workout.store.set_setting("charger_device", device)
+        else:
+            chosen = {}
+            charger.get_device = lambda: chosen.get("device")
+            charger.set_device = lambda device: chosen.update(device=device)
 
     async def settings_get(_request):
         return web.json_response(current_settings())
@@ -1161,8 +1180,21 @@ def make_app(workout, ble=None, faces=None, charger=None):
         except (KeyError, TypeError, ValueError):
             raise web.HTTPBadRequest(text="battery must be a number.")
         if charger:
-            await charger.report(level, bool(data.get("charging")))
+            await charger.report(level, bool(data.get("charging")), data.get("device"), data.get("name"))
         return web.json_response(charger.status() if charger else {"configured": False})
+
+    async def charger_device(request):
+        """{"device": "<ANDROID_ID>"}: the device whose battery the charger follows."""
+        if not charger:
+            raise web.HTTPConflict()
+        device = str((await request.json()).get("device") or "").strip()
+        if not device:
+            raise web.HTTPBadRequest(text="device is required.")
+        charger.set_device(device)
+        charger.level = charger.charging = None
+        charger.reported = 0.0
+        log.info("Tablet charger now follows %s.", charger.names.get(device, device))
+        return web.json_response(charger.status())
 
     async def charger_status(_request):
         return web.json_response(charger.status() if charger else {"configured": False})
@@ -1359,6 +1391,7 @@ def make_app(workout, ble=None, faces=None, charger=None):
     app.router.add_post("/api/identify", identify)
     app.router.add_post("/api/tablet", tablet_report)
     app.router.add_get("/api/charger", charger_status)
+    app.router.add_post("/api/charger/device", charger_device)
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/{name:[A-Za-z0-9._-]+}", static_file)
     app.cleanup_ctx.append(broadcaster)
