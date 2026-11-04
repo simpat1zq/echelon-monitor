@@ -18,7 +18,18 @@
   const scrim = el("div", "scrim");
   const drawer = el("nav", "drawer");
   drawer.setAttribute("aria-label", "Menu");
-  drawer.append(el("div", "head", "Treadmill"), link("/", "Live"), link("/runs", "Runs"));
+  // The tablet's battery, from the app's once-a-minute reports to the server.
+  const battery = el("div", "battery");
+  battery.hidden = true;
+  drawer.append(el("div", "head", "Treadmill"), battery, link("/", "Live"), link("/runs", "Runs"));
+  const showBattery = (c) => {
+    const t = c && c.tablet;
+    battery.hidden = !t || t.ago > 3600;
+    if (battery.hidden) return;
+    battery.textContent = `Tablet battery ${t.battery}%` + (t.charging ? " ⚡ charging" : "") +
+      (t.ago > 300 ? ` · ${Math.round(t.ago / 60)} min ago` : "");
+    battery.classList.toggle("low", t.battery <= 20 && !t.charging);
+  };
 
   drawer.append(el("div", "section", "Who's running"));
   const users = el("div");
@@ -115,13 +126,16 @@
   // Only the chosen device's battery counts (the app on a phone reports too).
   const myDevice = app && app.deviceId ? app.deviceId() : null;
   const showCharger = (c) => {
+    showBattery(c);
     chargeItem.hidden = !c.configured;
     if (!c.device) chargeItem.textContent = myDevice ? "Charging: tap to use this tablet" : "Charging: choose the tablet in its app";
     else if (myDevice && c.device !== myDevice) chargeItem.textContent = `Charging follows ${c.device_name || "another device"}`;
     else chargeItem.textContent = `Charging: ${c.low}–${c.high}%` + (c.battery != null ? ` · tablet at ${c.battery}%` : "");
     chargeItem.title = c.error || "";
   };
-  fetch("/api/charger").then((r) => r.json()).then(showCharger).catch(() => {});
+  const refreshCharger = () => fetch("/api/charger").then((r) => r.json()).then(showCharger).catch(() => {});
+  refreshCharger();
+  setInterval(refreshCharger, 60000);
   chargeItem.onclick = async () => {
     let c = await (await fetch("/api/charger")).json();
     if (myDevice && c.device !== myDevice) {
@@ -151,6 +165,7 @@
   document.body.append(scrim, drawer);
   const open = () => {
     refreshApp();
+    refreshCharger();
     document.body.classList.add("menu-open");
   };
   const close = () => document.body.classList.remove("menu-open");

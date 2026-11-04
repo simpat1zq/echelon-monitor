@@ -374,6 +374,7 @@ class Charger:
         self.get_device = lambda: None   # set by make_app: the chosen device's ID, kept in settings
         self.set_device = lambda device: None
         self.names = {}                  # device ID -> "Manufacturer Model", from reports
+        self.latest = {}                 # device ID -> its last report, for showing the level
         self.level = self.charging = None
         self.reported = 0.0
         self.on = None        # what we last told the plug
@@ -387,7 +388,11 @@ class Charger:
     def status(self):
         low, high = self.levels()
         device = self.get_device()
+        # The tablet's battery for the menu: the chosen device, or the only one reporting.
+        shown = self.latest.get(device) or (next(iter(self.latest.values())) if len(self.latest) == 1 else None)
+        tablet = dict(shown, ago=int(time.time() - shown["t"])) if shown else None
         return {"configured": self.configured, "device": device, "device_name": self.names.get(device),
+                "tablet": tablet,
                 "battery": self.level, "charging": self.charging,
                 "plug_on": self.on, "low": low, "high": high, "error": self.error,
                 "reported_ago": None if not self.reported else int(time.time() - self.reported)}
@@ -395,6 +400,8 @@ class Charger:
     async def report(self, level, charging, device=None, name=None):
         if device and name:
             self.names[device] = name
+        self.latest[device or ""] = {"battery": level, "charging": charging, "t": time.time(),
+                                     "name": name}
         if not device or device != self.get_device():
             return  # not the treadmill's tablet (or none chosen yet)
         self.level, self.charging, self.reported = level, charging, time.time()

@@ -20,6 +20,8 @@ header.topbar .runner { font-size: 13px; color: var(--muted); margin-top: 2px; c
 body.menu-open .scrim { opacity: 1; pointer-events: auto; }
 body.menu-open .drawer { transform: none; }
 .drawer .head { font-size: 18px; font-weight: 700; padding: 0 20px 12px; }
+.drawer .battery { font-size: 14px; color: var(--muted); padding: 0 20px 12px; margin-top: -6px; }
+.drawer .battery.low { color: #ffb74d; }
 .drawer .section { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em;
                    padding: 18px 20px 6px; }
 .drawer a, .drawer .item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 20px;
